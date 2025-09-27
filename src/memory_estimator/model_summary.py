@@ -1,0 +1,36 @@
+"""Aggregate representation of model-related metadata."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+from typing import Sequence
+
+from .model_shapes import ParameterShape
+from .model_shapes import count_total_parameters
+from .quantization import QuantizationSpec
+
+
+@dataclass
+class ModelSummary:
+    """Container holding the information required for memory estimation."""
+
+    model_id: str
+    config: Any
+    quantization: QuantizationSpec
+    parameter_shapes: Sequence[ParameterShape]
+    max_active_seqs: int
+    max_seq_len: int
+    enforce_eager: bool = False
+    cudagraph_capture_sizes: list[int] | None = None
+    max_num_batched_tokens: int | None = None
+    precomputed_parameter_bytes: int = 0
+    tensor_parallel_size: int = 1
+    block_size: int | None = None
+
+    @property
+    def parameter_count(self) -> int:
+        return count_total_parameters(self.parameter_shapes)
+
+    @property
+    def architecture(self) -> str:
+        return getattr(self.config, "model_type", "unknown")

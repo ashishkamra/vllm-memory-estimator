@@ -1,0 +1,45 @@
+name: vLLM Drift Check
+
+on:
+  schedule:
+    # Run weekly on Mondays at 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    # This job validates that our estimation formulas still produce results
+    # consistent with the latest vLLM release. It runs unit tests only
+    # (no GPU required). GPU-based integration tests (test_vllm_profile.py)
+    # should be run manually when investigating drift.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: python -m pytest tests/ --ignore=tests/test_vllm_profile.py --ignore=tests/test_memory_profile.py -v
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Smoke test against reference models
+        run: |
+          echo "=== openai/gpt-oss-120b (MXFP4 quantized) ==="
+          python -m memory_estimator.cli "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50"
+
+          echo ""
+          echo "=== facebook/opt-125m (dense, small) ==="
+          python -m memory_estimator.cli "vllm serve facebook/opt-125m --max-model-len 2048 --max-num-seqs 4"
+
+      - name: Check latest vLLM version
+        run: |
+          LATEST=$(pip index versions vllm 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+' | head -1)
+          echo "Latest vLLM version: $LATEST"
+          echo "If vLLM defaults have changed, review vllm_defaults.py"
