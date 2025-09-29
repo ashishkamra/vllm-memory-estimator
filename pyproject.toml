@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-memory-estimator"
+version = "0.1.0"
+description = "Estimate GPU memory needs for serving Hugging Face models with vLLM."
+readme = "README.md"
+authors = [
+    { name = "Ashish Kamra" }
+]
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "accelerate>=0.33.0",
+    "safetensors>=0.4.3",
+    "torch>=2.2.0",
+    "transformers>=4.45.0",
+    "vllm>=0.5.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "ruff>=0.6.4",
+]
+
+[project.scripts]
+memory-estimator = "memory_estimator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "cuda: mark tests that require a CUDA-compatible GPU",
+]
+
+[tool.ruff]
+line-length = 100
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+known-first-party = ["memory_estimator"]
