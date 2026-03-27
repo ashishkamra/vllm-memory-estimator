@@ -14,6 +14,10 @@ class ProfileSettings:
     model_id: str
     max_seq_len: int
     max_active_seqs: int
+    tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    enable_expert_parallel: bool = False
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -41,6 +45,37 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Peak number of concurrent sequences to profile (default: 4)",
     )
     parser.addoption(
+        "--profile-tp",
+        action="store",
+        type=int,
+        default=1,
+        dest="profile_tp",
+        help="Tensor parallel size for profiling (default: 1)",
+    )
+    parser.addoption(
+        "--profile-pp",
+        action="store",
+        type=int,
+        default=1,
+        dest="profile_pp",
+        help="Pipeline parallel size for profiling (default: 1)",
+    )
+    parser.addoption(
+        "--profile-dp",
+        action="store",
+        type=int,
+        default=1,
+        dest="profile_dp",
+        help="Data parallel size for profiling (default: 1)",
+    )
+    parser.addoption(
+        "--profile-ep",
+        action="store_true",
+        default=False,
+        dest="profile_ep",
+        help="Enable expert parallelism for profiling",
+    )
+    parser.addoption(
         "--profile-report",
         action="store_true",
         default=False,
@@ -56,6 +91,10 @@ def profile_settings(request: pytest.FixtureRequest) -> ProfileSettings:
         model_id=config.getoption("profile_model"),
         max_seq_len=config.getoption("profile_max_seq_len"),
         max_active_seqs=config.getoption("profile_max_active_seqs"),
+        tensor_parallel_size=config.getoption("profile_tp"),
+        pipeline_parallel_size=config.getoption("profile_pp"),
+        data_parallel_size=config.getoption("profile_dp"),
+        enable_expert_parallel=config.getoption("profile_ep"),
     )
 
 

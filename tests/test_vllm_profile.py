@@ -22,6 +22,10 @@ def _run_vllm_bench(
     batch_size: int,
     enforce_eager: bool = True,
     gpu_memory_utilization: float | None = None,
+    tensor_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    enable_expert_parallel: bool = False,
 ) -> tuple[int, str, str]:
     cmd = [
         "vllm", "bench", "latency",
@@ -37,6 +41,14 @@ def _run_vllm_bench(
         cmd.append("--enforce-eager")
     if gpu_memory_utilization is not None:
         cmd.extend(["--gpu-memory-utilization", str(gpu_memory_utilization)])
+    if tensor_parallel_size > 1:
+        cmd.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
+    if pipeline_parallel_size > 1:
+        cmd.extend(["--pipeline-parallel-size", str(pipeline_parallel_size)])
+    if data_parallel_size > 1:
+        cmd.extend(["--data-parallel-size", str(data_parallel_size)])
+    if enable_expert_parallel:
+        cmd.append("--enable-expert-parallel")
 
     env = os.environ.copy()
     env["VLLM_LOGGING_LEVEL"] = "DEBUG"
@@ -93,6 +105,10 @@ def test_vllm_estimates_align_with_runtime(request, profile_settings, profile_re
     model_id = profile_settings.model_id
     max_seq_len = profile_settings.max_seq_len
     max_active_seqs = profile_settings.max_active_seqs
+    tp = profile_settings.tensor_parallel_size
+    pp = profile_settings.pipeline_parallel_size
+    dp = profile_settings.data_parallel_size
+    ep = profile_settings.enable_expert_parallel
 
     _, estimate = estimate_from_inputs(
         EstimatorInputs(
@@ -100,24 +116,38 @@ def test_vllm_estimates_align_with_runtime(request, profile_settings, profile_re
             max_seq_len=max_seq_len,
             max_active_seqs=max_active_seqs,
             enforce_eager=True,
+            tensor_parallel_size=tp,
+            pipeline_parallel_size=pp,
+            data_parallel_size=dp,
+            enable_expert_parallel=ep,
         ))
 
     seq_len = max_seq_len
     batch = max_active_seqs
     gpu_util = None
-    returncode, stdout, stderr = _run_vllm_bench(model_id, seq_len, batch)
+    returncode, stdout, stderr = _run_vllm_bench(
+        model_id, seq_len, batch,
+        tensor_parallel_size=tp, pipeline_parallel_size=pp,
+        data_parallel_size=dp, enable_expert_parallel=ep,
+    )
 
     if returncode != 0 and _is_insufficient_memory(stderr):
         gpu_util = _compute_gpu_util()
         returncode, stdout, stderr = _run_vllm_bench(
-            model_id, seq_len, batch, gpu_memory_utilization=gpu_util)
+            model_id, seq_len, batch, gpu_memory_utilization=gpu_util,
+            tensor_parallel_size=tp, pipeline_parallel_size=pp,
+            data_parallel_size=dp, enable_expert_parallel=ep,
+        )
 
     if returncode != 0 and (_is_oom(stderr) or _is_insufficient_memory(stderr)):
         seq_len = max(64, seq_len // 2)
         batch = 1
         gpu_util = gpu_util or _compute_gpu_util()
         returncode, stdout, stderr = _run_vllm_bench(
-            model_id, seq_len, batch, gpu_memory_utilization=gpu_util)
+            model_id, seq_len, batch, gpu_memory_utilization=gpu_util,
+            tensor_parallel_size=tp, pipeline_parallel_size=pp,
+            data_parallel_size=dp, enable_expert_parallel=ep,
+        )
 
     if returncode != 0:
         pytest.fail(
