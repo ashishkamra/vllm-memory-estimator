@@ -109,9 +109,12 @@ def max_model_len(config: Any) -> int:
     Searches the same attributes vLLM uses to determine the default
     ``--max-model-len`` when it is not explicitly provided.
     """
+    # Note: model_max_length is intentionally excluded — it is a tokenizer
+    # attribute that can contain sentinel values (e.g. 1e30) and would produce
+    # absurd memory estimates.
     value = resolve_config_attr(config, (
         "max_position_embeddings", "n_positions", "max_seq_len",
-        "seq_length", "max_sequence_length", "model_max_length",
+        "seq_length", "max_sequence_length",
     ))
     if value is not None:
         return int(value)

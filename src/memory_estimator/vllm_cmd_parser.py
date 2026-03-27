@@ -62,4 +62,5 @@ def parse_vllm_command(cmd: str) -> EstimatorInputs:
         data_parallel_size=parsed.data_parallel_size,
         enable_expert_parallel=parsed.enable_expert_parallel,
         block_size=parsed.block_size,
+        quantization=parsed.quantization,
     )

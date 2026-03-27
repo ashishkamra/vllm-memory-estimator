@@ -185,8 +185,32 @@ def _kv_cache_dtype(
     return _DEFAULT_KV, None
 
 
-def parse_quantization(config) -> QuantizationSpec:
-    """Collect quantization settings from a Hugging Face config."""
+# Maps CLI -q values to (method, weight_bits) for runtime quantization
+# when the model config has no quantization_config.
+_CLI_QUANT_DEFAULTS: dict[str, tuple[str, float]] = {
+    "fp8": ("fp8", 8.0),
+    "fp8_e4m3": ("fp8", 8.0),
+    "int8": ("int8", 8.0),
+    "int4": ("int4", 4.0),
+    "awq": ("awq", 4.0),
+    "gptq": ("gptq", 4.0),
+    "squeezellm": ("squeezellm", 4.0),
+    "bitsandbytes": ("bitsandbytes", 4.0),
+    "bnb": ("bitsandbytes", 4.0),
+    "marlin": ("marlin", 4.0),
+}
+
+
+def parse_quantization(
+    config, cli_quantization: str | None = None,
+) -> QuantizationSpec:
+    """Collect quantization settings from a Hugging Face config.
+
+    If *cli_quantization* is provided (from ``-q`` / ``--quantization``) and
+    the config has no ``quantization_config``, a synthetic spec is created
+    from the CLI method name.  When the config already contains quantization
+    metadata, the config takes precedence (since it has richer information).
+    """
 
     quant_dict = _extract_quant_dict(config)
     method = None
@@ -198,6 +222,16 @@ def parse_quantization(config) -> QuantizationSpec:
         )
         if isinstance(method, str):
             method = method.lower()
+
+    # Apply CLI override when config has no quantization metadata
+    if method is None and cli_quantization:
+        cli_key = cli_quantization.strip().lower()
+        if cli_key in _CLI_QUANT_DEFAULTS:
+            method, bits = _CLI_QUANT_DEFAULTS[cli_key]
+            quant_dict = {"quant_method": method, "bits": bits}
+        else:
+            method = cli_key
+            quant_dict = {"quant_method": cli_key}
 
     activation_dtype = _normalise_activation_dtype(config, quant_dict)
     weight_dtype = _normalise_weight_dtype(quant_dict, activation_dtype)

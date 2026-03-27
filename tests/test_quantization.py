@@ -60,3 +60,37 @@ def test_parse_quantization_compressed_tensors():
     assert spec.is_quantized
     assert spec.weight_dtype.bits == 8
     assert spec.activation_dtype.bits == 8
+
+
+class DenseConfig:
+    model_type = "llama"
+    hidden_size = 16
+    num_hidden_layers = 2
+    num_attention_heads = 4
+    intermediate_size = 64
+    torch_dtype = "bfloat16"
+
+
+def test_cli_quantization_override_fp8():
+    """CLI -q fp8 should produce fp8 quantization when config has none."""
+    cfg = DenseConfig()
+    spec = parse_quantization(cfg, cli_quantization="fp8")
+    assert spec.method == "fp8"
+    assert spec.is_quantized
+    assert spec.weight_dtype.bits == 8
+
+
+def test_cli_quantization_override_awq():
+    cfg = DenseConfig()
+    spec = parse_quantization(cfg, cli_quantization="awq")
+    assert spec.method == "awq"
+    assert spec.weight_dtype.bits == 4
+
+
+def test_cli_quantization_ignored_when_config_has_quant():
+    """Config quantization takes precedence over CLI override."""
+    cfg = DummyConfig()
+    spec = parse_quantization(cfg, cli_quantization="fp8")
+    # Config says awq/4-bit, not fp8/8-bit
+    assert spec.method == "awq"
+    assert spec.weight_dtype.bits == 4

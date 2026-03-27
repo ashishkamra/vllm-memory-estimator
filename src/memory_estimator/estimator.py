@@ -32,6 +32,7 @@ class EstimatorInputs:
     data_parallel_size: int = 1
     enable_expert_parallel: bool = False
     block_size: int | None = None
+    quantization: str | None = None
     use_cache: bool = True
 
 
@@ -113,7 +114,7 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
     if seq_len is None:
         seq_len = max_model_len(config)
 
-    quant_spec = parse_quantization(config)
+    quant_spec = parse_quantization(config, cli_quantization=inputs.quantization)
     quant_spec = _apply_dtype_overrides(inputs, quant_spec)
     parameter_shapes, precomputed_bytes, expert_bytes, non_expert_bytes = (
         collect_parameter_shapes(

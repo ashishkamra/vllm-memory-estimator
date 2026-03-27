@@ -88,8 +88,14 @@ def _save_cache(
 
 
 def _is_expert_tensor(name: str) -> bool:
-    """Return True if the tensor name belongs to a MoE expert layer."""
-    return "expert" in name.lower()
+    """Return True if the tensor name belongs to a MoE expert layer.
+
+    Matches the ``.experts.`` path component used by standard MoE
+    architectures (Mixtral, DeepSeek, Qwen-MoE, etc.) rather than a
+    broad substring match that could misclassify tensors like
+    ``expert_gate`` or ``num_experts_per_tok``.
+    """
+    return ".experts." in name.lower()
 
 
 def _fetch_from_hub(

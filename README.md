@@ -46,14 +46,14 @@ Sample output:
 Model: openai/gpt-oss-120b
 ----------------------------------
 Parameters      :  60.77 GiB (57.73 – 63.81)
-Activations     :   0.92 GiB ( 0.46 –  1.83)
+Activations     :   0.87 GiB ( 0.43 –  1.74)
 KV Cache        :   6.87 GiB ( 6.73 –  7.00)
 Workspace       :   0.05 GiB ( 0.02 –  0.15)
 ----------------------------------
-Total (raw)     :  68.60 GiB (64.94 – 72.79)
+Total (raw)     :  68.55 GiB (64.91 – 72.70)
 vLLM overhead   :   8.01 GiB ( 4.00 – 16.01)
 ----------------------------------
-Total (vLLM)    :  76.61 GiB (68.94 – 88.81)
+Total (vLLM)    :  76.56 GiB (68.92 – 88.71)
 
 Context:
   Model architecture : gpt_oss

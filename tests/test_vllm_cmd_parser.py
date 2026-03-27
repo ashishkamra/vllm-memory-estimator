@@ -108,3 +108,11 @@ def test_parse_quantization():
         "vllm serve m --max-model-len 2048 -q awq"
     )
     assert inputs.model_id == "m"
+    assert inputs.quantization == "awq"
+
+
+def test_parse_quantization_long_flag():
+    inputs = parse_vllm_command(
+        "vllm serve m --max-model-len 2048 --quantization fp8"
+    )
+    assert inputs.quantization == "fp8"

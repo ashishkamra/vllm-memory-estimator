@@ -72,7 +72,9 @@ def estimate_activation_bytes(
     qkv_buf = tokens * hidden * 3 * bytes_per_act
     logits_buf = tokens * vocab * bytes_per_act if vocab > 0 else 0
 
-    peak_buffer = hidden_buf + max(ffn_buf, qkv_buf) + logits_buf
+    # Logits are computed at the output layer and don't co-exist in memory
+    # with intermediate layer activations (hidden/ffn/qkv).
+    peak_buffer = max(hidden_buf + max(ffn_buf, qkv_buf), logits_buf)
 
     moe_experts = resolve_config_attr(config, ("num_local_experts", "num_experts"))
     if moe_experts:
@@ -97,7 +99,7 @@ def estimate_kv_cache_bytes(
     total = cache_elements * dtype_bytes
 
     if quant_spec.kv_cache_dtype.bits <= 8 and quant_spec.kv_cache_scale_dtype:
-        scales = layers * kv_heads
+        scales = layers * kv_heads * 2  # K and V each have their own scales
         total += scales * bytes_per_element(quant_spec.kv_cache_scale_dtype)
     return total
 
@@ -112,31 +114,12 @@ def _default_cudagraph_capture_sizes(max_num_seqs: int) -> list[int]:
 
 
 def estimate_cuda_graph_bytes(
-    parameter_bytes: float, n_layers: int, capture_sizes: list[int]
+    per_gpu_param_bytes: float, local_layers: int, capture_sizes: list[int]
 ) -> float:
-    per_capture = parameter_bytes * CUDA_GRAPH_PARAM_FRACTION + n_layers * CUDA_GRAPH_BYTES_PER_CAPTURE
+    per_capture = (per_gpu_param_bytes * CUDA_GRAPH_PARAM_FRACTION
+                   + local_layers * CUDA_GRAPH_BYTES_PER_CAPTURE)
     return per_capture * len(capture_sizes)
 
-
-def estimate_vllm_overhead(
-    parameter_bytes: float,
-    n_layers: int,
-    max_active_seqs: int,
-    max_seq_len: int,
-    enforce_eager: bool = False,
-    cudagraph_capture_sizes: list[int] | None = None,
-    block_size: int = DEFAULT_BLOCK_SIZE,
-) -> tuple[float, float, float]:
-    if enforce_eager:
-        cuda_graph = 0.0
-    else:
-        if cudagraph_capture_sizes is None:
-            cudagraph_capture_sizes = _default_cudagraph_capture_sizes(max_active_seqs)
-        cuda_graph = estimate_cuda_graph_bytes(parameter_bytes, n_layers, cudagraph_capture_sizes)
-    blocks_per_seq = math.ceil(max_seq_len / block_size)
-    block_table = float(max_active_seqs * blocks_per_seq * 4)
-    worker = float(WORKER_OVERHEAD_BYTES)
-    return cuda_graph, block_table, worker
 
 
 def build_memory_buckets(
@@ -185,17 +168,6 @@ def build_memory_buckets(
     )
     workspace = activations * WORKSPACE_FRACTION
 
-    effective_block_size = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
-    cuda_graph, block_table, worker = estimate_vllm_overhead(
-        total_params,
-        layers,
-        effective_seqs,
-        max_seq_len,
-        enforce_eager=enforce_eager,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
-        block_size=effective_block_size,
-    )
-
     # --- Per-GPU parameter bytes ---
     if enable_expert_parallel and expert_bytes > 0:
         ep_size = tp * dp
@@ -208,8 +180,17 @@ def build_memory_buckets(
     activations /= tp       # PP doesn't reduce per-stage activation peak
     workspace /= tp
 
-    # --- CUDA graphs proportional to per-GPU params ---
-    if total_params > 0:
-        cuda_graph *= (params / total_params)
+    # --- vLLM overhead (CUDA graphs use per-GPU params and PP-local layers) ---
+    effective_block_size = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
+    local_layers = math.ceil(layers / pp)
+    if enforce_eager:
+        cuda_graph = 0.0
+    else:
+        if cudagraph_capture_sizes is None:
+            cudagraph_capture_sizes = _default_cudagraph_capture_sizes(effective_seqs)
+        cuda_graph = estimate_cuda_graph_bytes(params, local_layers, cudagraph_capture_sizes)
+    blocks_per_seq = math.ceil(max_seq_len / effective_block_size)
+    block_table = float(effective_seqs * blocks_per_seq * 4)
+    worker = float(WORKER_OVERHEAD_BYTES)
 
     return MemoryBuckets(params, activations, kv_cache, workspace, cuda_graph, block_table, worker)
