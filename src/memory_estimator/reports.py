@@ -91,7 +91,7 @@ class MemoryEstimate:
             _line("Total (raw)", self.total),
             _line("vLLM overhead", self.vllm_overhead),
             "----------------------------------",
-            _line("Total (vLLM)", self.total_with_vllm),
+            _line("Total (per GPU)" if tp > 1 else "Total (vLLM)", self.total_with_vllm),
         ]
 
         if tp > 1:
