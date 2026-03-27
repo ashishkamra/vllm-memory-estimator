@@ -121,6 +121,20 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
             inputs.model_id, revision=inputs.revision, use_cache=inputs.use_cache,
         )
     )
+
+    # When CLI quantization implies a smaller weight dtype than what's on
+    # disk, scale parameter bytes to reflect runtime GPU memory rather than
+    # on-disk size.  This is an approximation — embedding and norm layers
+    # typically stay in the original precision, but the bulk of parameters
+    # (attention + MLP weights) do get quantized.
+    if inputs.quantization:
+        base_spec = parse_quantization(config)
+        if quant_spec.weight_dtype.bits < base_spec.weight_dtype.bits:
+            scale = quant_spec.weight_dtype.bits / base_spec.weight_dtype.bits
+            precomputed_bytes = int(precomputed_bytes * scale)
+            expert_bytes = int(expert_bytes * scale)
+            non_expert_bytes = int(non_expert_bytes * scale)
+
     return ModelSummary(
         model_id=inputs.model_id,
         config=config,
