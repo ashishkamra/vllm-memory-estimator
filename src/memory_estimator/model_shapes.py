@@ -45,7 +45,7 @@ def _cache_path(model_id: str, revision: str | None) -> Path:
 
 def _load_cache(
     model_id: str, revision: str | None
-) -> tuple[list[ParameterShape], int] | None:
+) -> tuple[list[ParameterShape], int, int, int] | None:
     """Load cached parameter shapes if available."""
     path = _cache_path(model_id, revision)
     if not path.exists():
@@ -56,7 +56,10 @@ def _load_cache(
             ParameterShape(name=s["name"], shape=tuple(s["shape"]))
             for s in data["shapes"]
         ]
-        return shapes, data["total_bytes"]
+        total_bytes = data["total_bytes"]
+        expert_bytes = data.get("expert_bytes", 0)
+        non_expert_bytes = data.get("non_expert_bytes", total_bytes)
+        return shapes, total_bytes, expert_bytes, non_expert_bytes
     except (KeyError, json.JSONDecodeError, TypeError):
         return None
 
@@ -64,6 +67,7 @@ def _load_cache(
 def _save_cache(
     model_id: str, revision: str | None,
     shapes: list[ParameterShape], total_bytes: int,
+    expert_bytes: int, non_expert_bytes: int,
 ) -> None:
     """Save parameter shapes to cache."""
     path = _cache_path(model_id, revision)
@@ -74,6 +78,8 @@ def _save_cache(
             "revision": revision or "main",
             "shapes": [{"name": s.name, "shape": list(s.shape)} for s in shapes],
             "total_bytes": total_bytes,
+            "expert_bytes": expert_bytes,
+            "non_expert_bytes": non_expert_bytes,
             "cached_at": datetime.now(timezone.utc).isoformat(),
         }
         path.write_text(json.dumps(data))
@@ -81,15 +87,25 @@ def _save_cache(
         pass  # Cache write failure is not fatal
 
 
+def _is_expert_tensor(name: str) -> bool:
+    """Return True if the tensor name belongs to a MoE expert layer."""
+    return "expert" in name.lower()
+
+
 def _fetch_from_hub(
     model_id: str, revision: str | None
-) -> tuple[list[ParameterShape], int]:
-    """Fetch parameter shapes from safetensors headers via HF Hub."""
+) -> tuple[list[ParameterShape], int, int, int]:
+    """Fetch parameter shapes from safetensors headers via HF Hub.
+
+    Returns ``(shapes, total_bytes, expert_bytes, non_expert_bytes)``.
+    """
     from huggingface_hub import get_safetensors_metadata
 
     meta = get_safetensors_metadata(model_id, revision=revision)
     shapes: list[ParameterShape] = []
     total_bytes = 0
+    expert_bytes = 0
+    non_expert_bytes = 0
     seen: set[str] = set()
     for file_meta in meta.files_metadata.values():
         for name, tensor_info in file_meta.tensors.items():
@@ -98,13 +114,18 @@ def _fetch_from_hub(
                 shapes.append(ParameterShape(name=name, shape=tuple(tensor_info.shape)))
                 numel = math.prod(tensor_info.shape)
                 dtype_bytes = _SAFETENSORS_DTYPE_BYTES.get(tensor_info.dtype, 2.0)
-                total_bytes += int(numel * dtype_bytes)
-    return shapes, total_bytes
+                tensor_bytes = int(numel * dtype_bytes)
+                total_bytes += tensor_bytes
+                if _is_expert_tensor(name):
+                    expert_bytes += tensor_bytes
+                else:
+                    non_expert_bytes += tensor_bytes
+    return shapes, total_bytes, expert_bytes, non_expert_bytes
 
 
 def collect_parameter_shapes(
     model_id: str, revision: str | None = None, use_cache: bool = True,
-) -> tuple[list[ParameterShape], int]:
+) -> tuple[list[ParameterShape], int, int, int]:
     """Collect parameter shapes and total bytes from safetensors file headers.
 
     Uses ``huggingface_hub.get_safetensors_metadata`` which fetches only the
@@ -114,17 +135,19 @@ def collect_parameter_shapes(
     Results are cached locally so subsequent runs skip the network requests.
     Pass ``use_cache=False`` to force re-fetching.
 
-    Returns ``(shapes, total_bytes)`` where ``total_bytes`` is the exact
-    on-disk byte count computed from tensor metadata.
+    Returns ``(shapes, total_bytes, expert_bytes, non_expert_bytes)`` where
+    ``total_bytes`` is the exact on-disk byte count computed from tensor
+    metadata, and ``expert_bytes`` / ``non_expert_bytes`` split that total
+    by whether a tensor belongs to a MoE expert layer.
     """
     if use_cache:
         cached = _load_cache(model_id, revision)
         if cached is not None:
             return cached
 
-    shapes, total_bytes = _fetch_from_hub(model_id, revision)
-    _save_cache(model_id, revision, shapes, total_bytes)
-    return shapes, total_bytes
+    shapes, total_bytes, expert_bytes, non_expert_bytes = _fetch_from_hub(model_id, revision)
+    _save_cache(model_id, revision, shapes, total_bytes, expert_bytes, non_expert_bytes)
+    return shapes, total_bytes, expert_bytes, non_expert_bytes
 
 
 def count_total_parameters(shapes: Iterable[ParameterShape]) -> int:

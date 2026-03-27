@@ -20,6 +20,9 @@ def _build_vllm_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-num-batched-tokens", type=int, default=None)
     parser.add_argument("--revision", default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
+    parser.add_argument("--pipeline-parallel-size", "-pp", type=int, default=1)
+    parser.add_argument("--data-parallel-size", type=int, default=1)
+    parser.add_argument("--enable-expert-parallel", action="store_true", default=False)
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--quantization", "-q", default=None)
     return parser
@@ -55,5 +58,8 @@ def parse_vllm_command(cmd: str) -> EstimatorInputs:
         kv_cache_dtype=parsed.kv_cache_dtype,
         dtype=parsed.dtype,
         tensor_parallel_size=parsed.tensor_parallel_size,
+        pipeline_parallel_size=parsed.pipeline_parallel_size,
+        data_parallel_size=parsed.data_parallel_size,
+        enable_expert_parallel=parsed.enable_expert_parallel,
         block_size=parsed.block_size,
     )

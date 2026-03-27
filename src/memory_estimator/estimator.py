@@ -28,6 +28,9 @@ class EstimatorInputs:
     kv_cache_dtype: str | None = None
     dtype: str | None = None
     tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     block_size: int | None = None
     use_cache: bool = True
 
@@ -72,6 +75,8 @@ def _validate_inputs(inputs: EstimatorInputs) -> None:
         validate_positive_int(inputs.max_seq_len, name="max_seq_len")
     validate_positive_int(inputs.max_active_seqs, name="max_active_seqs")
     validate_positive_int(inputs.tensor_parallel_size, name="tensor_parallel_size")
+    validate_positive_int(inputs.pipeline_parallel_size, name="pipeline_parallel_size")
+    validate_positive_int(inputs.data_parallel_size, name="data_parallel_size")
     if inputs.max_num_batched_tokens is not None:
         validate_positive_int(inputs.max_num_batched_tokens, name="max_num_batched_tokens")
     if inputs.cudagraph_capture_sizes is not None:
@@ -110,8 +115,10 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
 
     quant_spec = parse_quantization(config)
     quant_spec = _apply_dtype_overrides(inputs, quant_spec)
-    parameter_shapes, precomputed_bytes = collect_parameter_shapes(
-        inputs.model_id, revision=inputs.revision, use_cache=inputs.use_cache,
+    parameter_shapes, precomputed_bytes, expert_bytes, non_expert_bytes = (
+        collect_parameter_shapes(
+            inputs.model_id, revision=inputs.revision, use_cache=inputs.use_cache,
+        )
     )
     return ModelSummary(
         model_id=inputs.model_id,
@@ -125,6 +132,11 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
         max_num_batched_tokens=inputs.max_num_batched_tokens,
         precomputed_parameter_bytes=precomputed_bytes,
         tensor_parallel_size=inputs.tensor_parallel_size,
+        pipeline_parallel_size=inputs.pipeline_parallel_size,
+        data_parallel_size=inputs.data_parallel_size,
+        enable_expert_parallel=inputs.enable_expert_parallel,
+        expert_bytes=expert_bytes,
+        non_expert_bytes=non_expert_bytes,
         block_size=inputs.block_size,
     )
 
@@ -140,9 +152,20 @@ def estimate_memory(summary: ModelSummary) -> MemoryEstimate:
         cudagraph_capture_sizes=summary.cudagraph_capture_sizes,
         max_num_batched_tokens=summary.max_num_batched_tokens,
         tensor_parallel_size=summary.tensor_parallel_size,
+        pipeline_parallel_size=summary.pipeline_parallel_size,
+        data_parallel_size=summary.data_parallel_size,
+        enable_expert_parallel=summary.enable_expert_parallel,
+        expert_bytes=summary.expert_bytes,
+        non_expert_bytes=summary.non_expert_bytes,
         block_size=summary.block_size,
     )
-    return build_estimate(summary.model_id, buckets, summary.tensor_parallel_size)
+    return build_estimate(
+        summary.model_id, buckets,
+        tensor_parallel_size=summary.tensor_parallel_size,
+        pipeline_parallel_size=summary.pipeline_parallel_size,
+        data_parallel_size=summary.data_parallel_size,
+        enable_expert_parallel=summary.enable_expert_parallel,
+    )
 
 
 def estimate_from_inputs(inputs: EstimatorInputs) -> tuple[ModelSummary, MemoryEstimate]:

@@ -25,6 +25,11 @@ class ModelSummary:
     max_num_batched_tokens: int | None = None
     precomputed_parameter_bytes: int = 0
     tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    enable_expert_parallel: bool = False
+    expert_bytes: int = 0
+    non_expert_bytes: int = 0
     block_size: int | None = None
 
     @property
@@ -34,3 +39,7 @@ class ModelSummary:
     @property
     def architecture(self) -> str:
         return getattr(self.config, "model_type", "unknown")
+
+    @property
+    def total_gpus(self) -> int:
+        return self.tensor_parallel_size * self.pipeline_parallel_size * self.data_parallel_size

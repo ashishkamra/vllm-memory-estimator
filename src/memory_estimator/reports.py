@@ -43,6 +43,13 @@ class MemoryEstimate:
     vllm_overhead: MemoryComponentEstimate
     total_with_vllm: MemoryComponentEstimate
     tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
+    enable_expert_parallel: bool = False
+
+    @property
+    def total_gpus(self) -> int:
+        return self.tensor_parallel_size * self.pipeline_parallel_size * self.data_parallel_size
 
     def as_dict(self) -> dict[str, dict[str, float]]:
         def _serialise(component: MemoryComponentEstimate) -> dict[str, float]:
@@ -61,10 +68,9 @@ class MemoryEstimate:
             "vllm_overhead": _serialise(self.vllm_overhead),
             "total_with_vllm": _serialise(self.total_with_vllm),
         }
-        if self.tensor_parallel_size > 1:
-            tp = self.tensor_parallel_size
+        if self.total_gpus > 1:
             result["total_cluster"] = _serialise(
-                _scale(self.total_with_vllm, tp)
+                _scale(self.total_with_vllm, self.total_gpus)
             )
         return result
 
@@ -75,10 +81,19 @@ class MemoryEstimate:
                 f"({component.lower_gib:5.2f} – {component.upper_gib:5.2f})"
             )
 
-        tp = self.tensor_parallel_size
+        total_gpus = self.total_gpus
         header = f"Model: {self.model_name}"
-        if tp > 1:
-            header += f"  (per GPU, TP={tp})"
+        if total_gpus > 1:
+            dims = []
+            if self.tensor_parallel_size > 1:
+                dims.append(f"TP={self.tensor_parallel_size}")
+            if self.pipeline_parallel_size > 1:
+                dims.append(f"PP={self.pipeline_parallel_size}")
+            if self.data_parallel_size > 1:
+                dims.append(f"DP={self.data_parallel_size}")
+            if self.enable_expert_parallel:
+                dims.append("EP")
+            header += f"  (per GPU, {', '.join(dims)})"
 
         lines = [
             header,
@@ -91,14 +106,14 @@ class MemoryEstimate:
             _line("Total (raw)", self.total),
             _line("vLLM overhead", self.vllm_overhead),
             "----------------------------------",
-            _line("Total (per GPU)" if tp > 1 else "Total (vLLM)", self.total_with_vllm),
+            _line("Total (per GPU)" if total_gpus > 1 else "Total (vLLM)", self.total_with_vllm),
         ]
 
-        if tp > 1:
-            cluster = _scale(self.total_with_vllm, tp)
+        if total_gpus > 1:
+            cluster = _scale(self.total_with_vllm, total_gpus)
             lines.append(f"{'Total cluster':<16}: {cluster.nominal_gib:6.2f} GiB "
                          f"({cluster.lower_gib:5.2f} – {cluster.upper_gib:5.2f})"
-                         f"  [{tp} GPUs]")
+                         f"  [{total_gpus} GPUs]")
 
         return "\n".join(lines)
 
@@ -114,7 +129,10 @@ def _component(nominal_bytes: float,
 
 
 def build_estimate(model_name: str, buckets: MemoryBuckets,
-                   tensor_parallel_size: int = 1) -> MemoryEstimate:
+                   tensor_parallel_size: int = 1,
+                   pipeline_parallel_size: int = 1,
+                   data_parallel_size: int = 1,
+                   enable_expert_parallel: bool = False) -> MemoryEstimate:
     parameters = _component(buckets.parameter_bytes, *PARAM_RANGE)
     activations = _component(buckets.activation_bytes, *ACTIVATION_RANGE)
     kv_cache = _component(buckets.kv_cache_bytes, *KV_CACHE_RANGE)
@@ -140,4 +158,7 @@ def build_estimate(model_name: str, buckets: MemoryBuckets,
 
     return MemoryEstimate(model_name, parameters, activations, kv_cache,
                           workspace, total, vllm_overhead, total_vllm,
-                          tensor_parallel_size=tensor_parallel_size)
+                          tensor_parallel_size=tensor_parallel_size,
+                          pipeline_parallel_size=pipeline_parallel_size,
+                          data_parallel_size=data_parallel_size,
+                          enable_expert_parallel=enable_expert_parallel)

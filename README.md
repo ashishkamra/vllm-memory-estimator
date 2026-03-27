@@ -4,11 +4,15 @@ A lightweight, offline utility that estimates GPU memory requirements for servin
 Hugging Face models with [vLLM](https://github.com/vllm-project/vllm).
 
 You pass your `vllm serve` command as a quoted string. The tool parses
-memory-relevant flags (model, sequence length, batch size, dtype, tensor
-parallelism, etc.), reads model metadata from Hugging Face — no GPU or weight
-download required — and produces lower/upper ranges for every memory component:
+memory-relevant flags (model, sequence length, batch size, dtype, parallelism,
+etc.), reads model metadata from Hugging Face — no GPU or weight download
+required — and produces lower/upper per-GPU ranges for every memory component:
 parameters, activations, KV cache, workspace, and vLLM runtime overhead (CUDA
 graphs, block tables, worker buffers).
+
+Supports tensor parallelism (TP), pipeline parallelism (PP), data parallelism
+(DP), and expert parallelism (EP) for MoE models — including DeepSeek-style
+DP+EP (Wide EP) where attention is replicated and experts are distributed.
 
 The only runtime dependency is `huggingface_hub`. No torch, transformers, or
 vLLM installation needed.
@@ -65,8 +69,8 @@ Context:
 
 Each row shows a nominal estimate plus a (lower – upper) confidence range.
 
-Use `--kv-cache-dtype fp8` to halve KV cache memory, or `-tp` to see per-GPU
-estimates:
+Use `--kv-cache-dtype fp8` to halve KV cache memory, or parallelism flags to
+see per-GPU estimates:
 
 ```bash
 # FP8 KV cache — halves KV cache memory
@@ -74,6 +78,15 @@ memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-
 
 # Tensor parallelism — shows per-GPU + total cluster memory
 memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50 -tp 2"
+
+# Pipeline parallelism — splits layers across GPUs
+memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50 -tp 2 -pp 2"
+
+# Data parallelism — full replica per GPU, fewer sequences per rank
+memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 200 --data-parallel-size 4"
+
+# Expert parallelism (MoE) — distributes experts, replicates attention
+memory-estimator "vllm serve deepseek-ai/DeepSeek-V3 --max-model-len 4096 -tp 2 --data-parallel-size 4 --enable-expert-parallel"
 ```
 
 Add `--json` for machine-readable output:
@@ -94,7 +107,10 @@ Unknown flags (e.g. `--host`, `--port`) are silently ignored.
 | `--max-num-seqs` | Concurrent sequences for KV cache sizing (default: 256) |
 | `--kv-cache-dtype` | KV cache precision — `fp8` halves cache memory |
 | `--dtype` | Activation precision override |
-| `--tensor-parallel-size` / `-tp` | Number of GPUs — divides memory per GPU |
+| `--tensor-parallel-size` / `-tp` | Tensor parallelism — shards weights, KV cache, activations |
+| `--pipeline-parallel-size` / `-pp` | Pipeline parallelism — splits layers across GPUs |
+| `--data-parallel-size` | Data parallelism — full replica per GPU, fewer seqs per rank |
+| `--enable-expert-parallel` | Expert parallelism (MoE) — distributes experts, replicates attention |
 | `--enforce-eager` | Disable CUDA graphs (reduces overhead) |
 | `--block-size` | Paged attention block size |
 | `--max-num-batched-tokens` | Tokens per forward pass (controls activation sizing) |
@@ -113,6 +129,9 @@ summary, estimate = estimate_from_inputs(
         max_active_seqs=50,
         kv_cache_dtype="fp8",
         tensor_parallel_size=2,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        enable_expert_parallel=False,
     )
 )
 
@@ -161,7 +180,20 @@ Use `estimate.as_dict()` for a serialisable dictionary.
    - **Block tables**: per-sequence metadata for paged attention
    - **Worker overhead**: fixed ~300 MiB for vLLM worker process state
 
-7. **Range construction** — Each component gets a confidence range to account
+7. **Parallelism** — Applies per-GPU memory division based on the active
+   parallelism strategy:
+
+   | Strategy | Weights | KV Cache | Activations |
+   |----------|---------|----------|-------------|
+   | **TP** | /TP | /TP | /TP |
+   | **PP** | /PP | /PP | unchanged |
+   | **DP** | unchanged | seqs/DP | seqs/DP |
+   | **EP** (MoE) | attention replicated, experts /(TP×DP) | /TP | /TP |
+
+   For MoE models with EP enabled, expert vs non-expert parameters are
+   identified by tensor name from the safetensors headers.
+
+8. **Range construction** — Each component gets a confidence range to account
    for runtime variability (allocator fragmentation, framework overhead, etc.).
 
 ## Memory Components

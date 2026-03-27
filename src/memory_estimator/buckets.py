@@ -149,15 +149,30 @@ def build_memory_buckets(
     cudagraph_capture_sizes: list[int] | None = None,
     max_num_batched_tokens: int | None = None,
     tensor_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    enable_expert_parallel: bool = False,
+    expert_bytes: float = 0.0,
+    non_expert_bytes: float = 0.0,
     block_size: int | None = None,
 ) -> MemoryBuckets:
-    params = float(parameter_bytes)
+    tp = tensor_parallel_size
+    pp = pipeline_parallel_size
+    dp = data_parallel_size
+
+    # DP: each rank serves a fraction of sequences
+    effective_seqs = math.ceil(max_active_seqs / dp) if dp > 1 else max_active_seqs
+    effective_batched_tokens = max_num_batched_tokens
+    if dp > 1 and max_num_batched_tokens is not None:
+        effective_batched_tokens = math.ceil(max_num_batched_tokens / dp)
+
+    total_params = float(parameter_bytes)
     activations = estimate_activation_bytes(
         config,
-        max_active_seqs,
+        effective_seqs,
         max_seq_len,
         quant_spec,
-        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_batched_tokens=effective_batched_tokens,
     )
 
     hidden = hidden_size(config)
@@ -166,27 +181,35 @@ def build_memory_buckets(
     hdim = head_dim(config, hidden, n_heads)
 
     kv_cache = estimate_kv_cache_bytes(
-        max_active_seqs, max_seq_len, quant_spec, layers, kv_heads, hdim
+        effective_seqs, max_seq_len, quant_spec, layers, kv_heads, hdim
     )
     workspace = activations * WORKSPACE_FRACTION
 
     effective_block_size = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
     cuda_graph, block_table, worker = estimate_vllm_overhead(
-        params,
+        total_params,
         layers,
-        max_active_seqs,
+        effective_seqs,
         max_seq_len,
         enforce_eager=enforce_eager,
         cudagraph_capture_sizes=cudagraph_capture_sizes,
         block_size=effective_block_size,
     )
 
-    tp = tensor_parallel_size
-    if tp > 1:
-        params /= tp
-        activations /= tp
-        kv_cache /= tp
-        workspace /= tp
-        cuda_graph /= tp
+    # --- Per-GPU parameter bytes ---
+    if enable_expert_parallel and expert_bytes > 0:
+        ep_size = tp * dp
+        params = (non_expert_bytes / tp + expert_bytes / ep_size) / pp
+    else:
+        params = total_params / (tp * pp)
+
+    # --- Per-GPU KV cache and activations ---
+    kv_cache /= (tp * pp)
+    activations /= tp       # PP doesn't reduce per-stage activation peak
+    workspace /= tp
+
+    # --- CUDA graphs proportional to per-GPU params ---
+    if total_params > 0:
+        cuda_graph *= (params / total_params)
 
     return MemoryBuckets(params, activations, kv_cache, workspace, cuda_graph, block_table, worker)
