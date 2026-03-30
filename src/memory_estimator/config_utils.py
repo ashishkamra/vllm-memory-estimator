@@ -103,6 +103,102 @@ def vocab_size(config: Any) -> int:
     return 0
 
 
+def sliding_window(config: Any) -> int | None:
+    """Return the sliding window size, or None if not set."""
+    value = resolve_config_attr(config, ("sliding_window",))
+    if value is not None and int(value) > 0:
+        return int(value)
+    return None
+
+
+def kv_lora_rank(config: Any) -> int:
+    """Return the KV LoRA rank for MLA models, or 0 if not applicable."""
+    value = resolve_config_attr(config, ("kv_lora_rank",))
+    return int(value) if value is not None else 0
+
+
+def qk_rope_head_dim(config: Any) -> int:
+    """Return the RoPE head dimension for MLA models, or 0 if not applicable."""
+    value = resolve_config_attr(config, ("qk_rope_head_dim",))
+    return int(value) if value is not None else 0
+
+
+def attention_chunk_size(config: Any) -> int | None:
+    """Return the attention chunk size for chunked local attention, or None."""
+    value = resolve_config_attr(config, ("attention_chunk_size",))
+    if value is not None and int(value) > 0:
+        return int(value)
+    return None
+
+
+def layers_block_type(config: Any) -> list[str] | None:
+    """Return per-layer block types for hybrid models (e.g. Jamba).
+
+    Returns a list like ``["attention", "mamba", "attention", ...]`` or
+    ``None`` if the config does not declare layer types.
+    """
+    value = resolve_config_attr(config, ("layers_block_type",))
+    if value is not None and isinstance(value, (list, tuple)):
+        return list(value)
+    return None
+
+
+def no_rope_layers(config: Any) -> list[int] | None:
+    """Return the no-RoPE layer mask for models like LLaMA-4.
+
+    Returns a list of 0/1 values where 0 means the layer uses RoPE (full
+    attention) and non-zero means NoPE (chunked local attention), or
+    ``None`` if not set.
+    """
+    value = resolve_config_attr(config, ("no_rope_layers",))
+    if value is not None and isinstance(value, (list, tuple)):
+        return list(value)
+    return None
+
+
+def mamba_d_state(config: Any) -> int:
+    """Return Mamba SSM state dimension, or 0 if not a Mamba model."""
+    value = resolve_config_attr(config, ("mamba_d_state", "ssm_state_size",
+                                         "state_size"))
+    return int(value) if value is not None else 0
+
+
+def mamba_d_conv(config: Any) -> int:
+    """Return Mamba convolution kernel size, or 0 if not a Mamba model."""
+    value = resolve_config_attr(config, ("mamba_d_conv", "conv_kernel"))
+    return int(value) if value is not None else 0
+
+
+def mamba_expand(config: Any) -> float:
+    """Return Mamba expansion factor, or 0 if not a Mamba model."""
+    value = resolve_config_attr(config, ("mamba_expand", "expand"))
+    return float(value) if value is not None else 0.0
+
+
+def mamba_n_groups(config: Any) -> int:
+    """Return Mamba2 number of groups, or 1."""
+    value = resolve_config_attr(config, ("mamba_n_groups", "n_groups"))
+    return int(value) if value is not None else 1
+
+
+def mamba_n_heads(config: Any) -> int:
+    """Return Mamba2 number of heads, or 0."""
+    value = resolve_config_attr(config, ("mamba_n_heads", "num_heads"))
+    return int(value) if value is not None else 0
+
+
+def mamba_head_dim(config: Any) -> int:
+    """Return Mamba2 head dimension, or 0."""
+    value = resolve_config_attr(config, ("mamba_d_head", "head_dim"))
+    return int(value) if value is not None else 0
+
+
+def model_type(config: Any) -> str:
+    """Return the model_type string from config, or 'unknown'."""
+    value = resolve_config_attr(config, ("model_type",))
+    return str(value) if value is not None else "unknown"
+
+
 def max_model_len(config: Any) -> int:
     """Return the model's maximum sequence length from config.
 

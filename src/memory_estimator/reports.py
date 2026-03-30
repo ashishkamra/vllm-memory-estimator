@@ -46,6 +46,7 @@ class MemoryEstimate:
     pipeline_parallel_size: int = 1
     data_parallel_size: int = 1
     enable_expert_parallel: bool = False
+    kv_cache_spec_type: str = "full"
 
     @property
     def total_gpus(self) -> int:
@@ -63,6 +64,7 @@ class MemoryEstimate:
             "parameters": _serialise(self.parameters),
             "activations": _serialise(self.activations),
             "kv_cache": _serialise(self.kv_cache),
+            "kv_cache_spec_type": self.kv_cache_spec_type,
             "workspace": _serialise(self.workspace),
             "total": _serialise(self.total),
             "vllm_overhead": _serialise(self.vllm_overhead),
@@ -100,7 +102,8 @@ class MemoryEstimate:
             "----------------------------------",
             _line("Parameters", self.parameters),
             _line("Activations", self.activations),
-            _line("KV Cache", self.kv_cache),
+            _line("KV Cache" if self.kv_cache_spec_type == "full"
+                  else f"KV Cache ({self.kv_cache_spec_type})", self.kv_cache),
             _line("Workspace", self.workspace),
             "----------------------------------",
             _line("Total (raw)", self.total),
@@ -161,4 +164,5 @@ def build_estimate(model_name: str, buckets: MemoryBuckets,
                           tensor_parallel_size=tensor_parallel_size,
                           pipeline_parallel_size=pipeline_parallel_size,
                           data_parallel_size=data_parallel_size,
-                          enable_expert_parallel=enable_expert_parallel)
+                          enable_expert_parallel=enable_expert_parallel,
+                          kv_cache_spec_type=buckets.kv_cache_spec_type)

@@ -5,14 +5,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .config_utils import head_dim
 from .config_utils import hidden_size
 from .config_utils import intermediate_size
-from .config_utils import num_attention_heads
 from .config_utils import num_layers
 from .config_utils import resolve_config_attr
 from .config_utils import vocab_size
 from .dtype_utils import bytes_per_element
+from .kv_cache_specs import estimate_kv_cache_bytes_specaware
 from .quantization import QuantizationSpec
 from .vllm_defaults import ACTIVATION_OVERHEAD_FACTOR
 from .vllm_defaults import CUDA_GRAPH_BYTES_PER_CAPTURE
@@ -32,6 +31,7 @@ class MemoryBuckets:
     cuda_graph_bytes: float = 0.0
     block_table_bytes: float = 0.0
     worker_overhead_bytes: float = 0.0
+    kv_cache_spec_type: str = "full"
 
     @property
     def vllm_overhead_bytes(self) -> float:
@@ -149,6 +149,8 @@ def build_memory_buckets(
     if dp > 1 and max_num_batched_tokens is not None:
         effective_batched_tokens = math.ceil(max_num_batched_tokens / dp)
 
+    effective_block_size = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
+
     total_params = float(parameter_bytes)
     activations = estimate_activation_bytes(
         config,
@@ -158,14 +160,16 @@ def build_memory_buckets(
         max_num_batched_tokens=effective_batched_tokens,
     )
 
-    hidden = hidden_size(config)
     layers = num_layers(config)
-    n_heads, kv_heads = num_attention_heads(config)
-    hdim = head_dim(config, hidden, n_heads)
 
-    kv_cache = estimate_kv_cache_bytes(
-        effective_seqs, max_seq_len, quant_spec, layers, kv_heads, hdim
+    kv_result = estimate_kv_cache_bytes_specaware(
+        config, effective_seqs, max_seq_len, quant_spec,
+        block_size=effective_block_size,
+        max_num_batched_tokens=effective_batched_tokens,
+        tensor_parallel_size=tp,
     )
+    kv_cache = kv_result.total_bytes
+    kv_spec_type = kv_result.spec_type
     workspace = activations * WORKSPACE_FRACTION
 
     # --- Per-GPU parameter bytes ---
@@ -181,7 +185,6 @@ def build_memory_buckets(
     workspace /= tp
 
     # --- vLLM overhead (CUDA graphs use per-GPU params and PP-local layers) ---
-    effective_block_size = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
     local_layers = math.ceil(layers / pp)
     if enforce_eager:
         cuda_graph = 0.0
@@ -193,4 +196,5 @@ def build_memory_buckets(
     block_table = float(effective_seqs * blocks_per_seq * 4)
     worker = float(WORKER_OVERHEAD_BYTES)
 
-    return MemoryBuckets(params, activations, kv_cache, workspace, cuda_graph, block_table, worker)
+    return MemoryBuckets(params, activations, kv_cache, workspace, cuda_graph, block_table, worker,
+                         kv_cache_spec_type=kv_spec_type)
