@@ -166,7 +166,6 @@ def build_memory_buckets(
         config, effective_seqs, max_seq_len, quant_spec,
         block_size=effective_block_size,
         max_num_batched_tokens=effective_batched_tokens,
-        tensor_parallel_size=tp,
     )
     kv_cache = kv_result.total_bytes
     kv_spec_type = kv_result.spec_type

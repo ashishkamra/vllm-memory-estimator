@@ -241,15 +241,15 @@ def mamba1_state_bytes_per_layer(
     d_state: int,
     d_conv: int,
     dtype_bytes: float,
-    tp: int = 1,
 ) -> float:
     """Compute Mamba1 state size per layer (conv + temporal states).
 
     Mirrors ``mamba1_state_shape`` in ``mamba_utils.py``.
+    Returns **unsharded** total — TP division is applied later by the
+    caller (``build_memory_buckets``) uniformly for all spec types.
     """
-    local_intermediate = intermediate_size // tp
-    conv_elements = (d_conv - 1) * local_intermediate
-    temporal_elements = local_intermediate * d_state
+    conv_elements = (d_conv - 1) * intermediate_size
+    temporal_elements = intermediate_size * d_state
     return (conv_elements + temporal_elements) * dtype_bytes
 
 
@@ -261,15 +261,16 @@ def mamba2_state_bytes_per_layer(
     intermediate_size: int,
     n_groups: int,
     dtype_bytes: float,
-    tp: int = 1,
 ) -> float:
     """Compute Mamba2 state size per layer (conv + temporal states).
 
     Mirrors ``mamba2_state_shape`` in ``mamba_utils.py``.
+    Returns **unsharded** total — TP division is applied later by the
+    caller (``build_memory_buckets``) uniformly for all spec types.
     """
     conv_dim = intermediate_size + 2 * n_groups * d_state
-    conv_elements = (d_conv - 1) * (conv_dim // tp)
-    temporal_elements = (n_heads // tp) * mamba_head_dim * d_state
+    conv_elements = (d_conv - 1) * conv_dim
+    temporal_elements = n_heads * mamba_head_dim * d_state
     return (conv_elements + temporal_elements) * dtype_bytes
 
 
@@ -342,7 +343,6 @@ def _compute_hybrid_kv_bytes(
     quant_spec: QuantizationSpec,
     block_size: int,
     batched: int,
-    tp: int,
 ) -> KVCacheResult:
     """Compute KV cache for hybrid models with mixed layer types.
 
@@ -420,11 +420,11 @@ def _compute_hybrid_kv_bytes(
             n_groups = _cfg_mamba_n_groups(config)
             state_per_layer = mamba2_state_bytes_per_layer(
                 m_heads, m_hdim, d_state, d_conv, mamba_inter, n_groups,
-                dtype_bytes, tp=tp,
+                dtype_bytes,
             )
         else:
             state_per_layer = mamba1_state_bytes_per_layer(
-                mamba_inter, d_state, d_conv, dtype_bytes, tp=tp,
+                mamba_inter, d_state, d_conv, dtype_bytes,
             )
         b = mamba_kv_bytes(
             max_active_seqs, max_seq_len, mamba_layers,
@@ -443,12 +443,12 @@ def estimate_kv_cache_bytes_specaware(
     quant_spec: QuantizationSpec,
     block_size: int | None = None,
     max_num_batched_tokens: int | None = None,
-    tensor_parallel_size: int = 1,
 ) -> KVCacheResult:
     """Dispatch to the right KV cache formula based on model config.
 
     This is the main entry point — it detects the spec type and calls the
-    matching formula function.
+    matching formula function.  Returns **unsharded** totals; TP/PP division
+    is applied uniformly by ``build_memory_buckets``.
     """
     bs = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
     batched = (max_num_batched_tokens
@@ -460,7 +460,6 @@ def estimate_kv_cache_bytes_specaware(
     if spec_type == "hybrid":
         return _compute_hybrid_kv_bytes(
             config, max_active_seqs, max_seq_len, quant_spec, bs, batched,
-            tp=tensor_parallel_size,
         )
 
     hidden = hidden_size(config)
@@ -483,12 +482,11 @@ def estimate_kv_cache_bytes_specaware(
             n_groups = _cfg_mamba_n_groups(config)
             state_per_layer = mamba2_state_bytes_per_layer(
                 m_heads, m_hdim, d_state, d_conv, mamba_inter, n_groups,
-                dtype_bytes, tp=tensor_parallel_size,
+                dtype_bytes,
             )
         else:
             state_per_layer = mamba1_state_bytes_per_layer(
                 mamba_inter, d_state, d_conv, dtype_bytes,
-                tp=tensor_parallel_size,
             )
         total = mamba_kv_bytes(
             max_active_seqs, max_seq_len, layers_, state_per_layer, bs,
@@ -498,9 +496,11 @@ def estimate_kv_cache_bytes_specaware(
     if spec_type == "mla":
         lora_rank = _cfg_kv_lora_rank(config)
         rope_dim = _cfg_qk_rope_head_dim(config)
+        use_fp8 = quant_spec.kv_cache_dtype.bits == 8
         total = mla_kv_bytes(
             max_active_seqs, max_seq_len, quant_spec,
             layers_, lora_rank, rope_dim, bs,
+            fp8_ds_mla=use_fp8,
         )
         return KVCacheResult(total_bytes=total, spec_type="mla")
 

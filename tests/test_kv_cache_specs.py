@@ -422,15 +422,14 @@ def test_mamba1_state_bytes():
     assert result == expected
 
 
-def test_mamba1_state_bytes_with_tp():
-    """TP should divide the intermediate size."""
-    full = mamba1_state_bytes_per_layer(
-        intermediate_size=5120, d_state=16, d_conv=4, dtype_bytes=2.0, tp=1,
+def test_mamba1_state_bytes_unsharded():
+    """State functions return unsharded totals (TP applied later by build_memory_buckets)."""
+    result = mamba1_state_bytes_per_layer(
+        intermediate_size=5120, d_state=16, d_conv=4, dtype_bytes=2.0,
     )
-    tp2 = mamba1_state_bytes_per_layer(
-        intermediate_size=5120, d_state=16, d_conv=4, dtype_bytes=2.0, tp=2,
-    )
-    assert tp2 == full / 2
+    # Should equal full unsharded size regardless of TP
+    expected = (3 * 5120 + 5120 * 16) * 2
+    assert result == expected
 
 
 def test_mamba2_state_bytes():
@@ -639,3 +638,64 @@ def test_build_memory_buckets_hybrid():
     )
     assert buckets.kv_cache_spec_type == "hybrid"
     assert buckets.kv_cache_bytes > 0
+
+
+def test_mamba_tp_no_double_division():
+    """TP division should only happen once in build_memory_buckets, not in state functions.
+
+    Regression test: previously mamba state functions divided by TP internally,
+    then build_memory_buckets divided by tp*pp again, causing double-division.
+    """
+    from memory_estimator.buckets import build_memory_buckets
+
+    cfg = PureMamba1Config()
+    quant_spec = parse_quantization(cfg)
+
+    tp1 = build_memory_buckets(
+        cfg, parameter_bytes=1_000_000, max_active_seqs=4,
+        max_seq_len=4096, quant_spec=quant_spec,
+        tensor_parallel_size=1,
+    )
+    tp2 = build_memory_buckets(
+        cfg, parameter_bytes=1_000_000, max_active_seqs=4,
+        max_seq_len=4096, quant_spec=quant_spec,
+        tensor_parallel_size=2,
+    )
+    # With TP=2, KV cache per GPU should be exactly half of TP=1
+    assert abs(tp2.kv_cache_bytes - tp1.kv_cache_bytes / 2) < 1
+
+
+def test_orchestrator_fp8_mla():
+    """FP8 MLA should use the fixed 656 bytes/token layout via the orchestrator."""
+    from memory_estimator.dtype_utils import normalise_dtype
+    from memory_estimator.quantization import QuantizationSpec
+
+    cfg = MLAConfig()
+    fp8_quant = QuantizationSpec(
+        method=None,
+        weight_dtype=normalise_dtype("bfloat16"),
+        activation_dtype=normalise_dtype("bfloat16"),
+        kv_cache_dtype=normalise_dtype("fp8"),
+        kv_cache_scale_dtype=None,
+    )
+    result = estimate_kv_cache_bytes_specaware(
+        cfg, 4, 4096, fp8_quant, block_size=16,
+    )
+    assert result.spec_type == "mla"
+    # Verify it used the fp8 formula: page = 16 * 656 = 10496
+    # pages_per_seq = ceil(4096/16) = 256
+    # total = 60 * 4 * 256 * 10496
+    expected = 60 * 4 * 256 * (16 * 656)
+    assert result.total_bytes == expected
+
+
+def test_orchestrator_bf16_mla_not_fp8():
+    """BF16 MLA should NOT use the FP8 fixed layout."""
+    cfg = MLAConfig()
+    quant_spec = parse_quantization(cfg)
+    result = estimate_kv_cache_bytes_specaware(
+        cfg, 4, 4096, quant_spec, block_size=16,
+    )
+    # BF16 MLA: page = 16 * 1 * 576 * 2 = 18432
+    expected = 60 * 4 * 256 * (16 * 1 * 576 * 2)
+    assert result.total_bytes == expected
