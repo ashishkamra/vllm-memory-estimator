@@ -85,25 +85,6 @@ def estimate_activation_bytes(
     return peak_buffer * ACTIVATION_OVERHEAD_FACTOR
 
 
-def estimate_kv_cache_bytes(
-    max_active_seqs: int,
-    max_seq_len: int,
-    quant_spec: QuantizationSpec,
-    layers: int,
-    kv_heads: int,
-    hdim: int,
-) -> float:
-    dtype_bytes = bytes_per_element(quant_spec.kv_cache_dtype)
-
-    cache_elements = layers * max_active_seqs * max_seq_len * kv_heads * hdim * 2
-    total = cache_elements * dtype_bytes
-
-    if quant_spec.kv_cache_dtype.bits <= 8 and quant_spec.kv_cache_scale_dtype:
-        scales = layers * kv_heads * 2  # K and V each have their own scales
-        total += scales * bytes_per_element(quant_spec.kv_cache_scale_dtype)
-    return total
-
-
 def _default_cudagraph_capture_sizes(max_num_seqs: int) -> list[int]:
     sizes = []
     bs = 1

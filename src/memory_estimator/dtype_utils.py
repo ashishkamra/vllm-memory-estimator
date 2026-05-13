@@ -4,12 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-try:
-    import torch
-
-    _HAS_TORCH = True
-except ModuleNotFoundError:
-    _HAS_TORCH = False
+import torch
 
 
 @dataclass(frozen=True)
@@ -43,19 +38,19 @@ _DTYPE_ALIASES: dict[str, str] = {
 
 # Canonical scalar descriptors.
 _SCALAR_TYPES: dict[str, ScalarType] = {
-    "float16": ScalarType("float16", 16, torch.float16 if _HAS_TORCH else None),
-    "bfloat16": ScalarType("bfloat16", 16, torch.bfloat16 if _HAS_TORCH else None),
-    "float32": ScalarType("float32", 32, torch.float32 if _HAS_TORCH else None),
-    "float64": ScalarType("float64", 64, torch.float64 if _HAS_TORCH else None),
-    "uint8": ScalarType("uint8", 8, torch.uint8 if _HAS_TORCH else None),
-    "int8": ScalarType("int8", 8, torch.int8 if _HAS_TORCH else None),
-    "float8_e4m3fn": ScalarType("float8_e4m3fn", 8),
-    "float8_e5m2": ScalarType("float8_e5m2", 8),
+    "float16": ScalarType("float16", 16, torch.float16),
+    "bfloat16": ScalarType("bfloat16", 16, torch.bfloat16),
+    "float32": ScalarType("float32", 32, torch.float32),
+    "float64": ScalarType("float64", 64, torch.float64),
+    "uint8": ScalarType("uint8", 8, torch.uint8),
+    "int8": ScalarType("int8", 8, torch.int8),
+    "float8_e4m3fn": ScalarType("float8_e4m3fn", 8, torch.float8_e4m3fn),
+    "float8_e5m2": ScalarType("float8_e5m2", 8, torch.float8_e5m2),
     "uint4": ScalarType("uint4", 4),
     "nf4": ScalarType("nf4", 4),
-    "int32": ScalarType("int32", 32, torch.int32 if _HAS_TORCH else None),
-    "int16": ScalarType("int16", 16, torch.int16 if _HAS_TORCH else None),
-    "int64": ScalarType("int64", 64, torch.int64 if _HAS_TORCH else None),
+    "int32": ScalarType("int32", 32, torch.int32),
+    "int16": ScalarType("int16", 16, torch.int16),
+    "int64": ScalarType("int64", 64, torch.int64),
 }
 
 
@@ -70,7 +65,7 @@ def normalise_dtype(value: Any) -> ScalarType:
     if isinstance(value, ScalarType):
         return value
 
-    if _HAS_TORCH and isinstance(value, torch.dtype):
+    if isinstance(value, torch.dtype):
         for scalar in _SCALAR_TYPES.values():
             if scalar.torch_dtype is value:
                 return scalar

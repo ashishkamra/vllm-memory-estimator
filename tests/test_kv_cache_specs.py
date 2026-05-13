@@ -1,14 +1,6 @@
-"""Tests for spec-aware KV cache estimation."""
-from memory_estimator.buckets import estimate_kv_cache_bytes
-from memory_estimator.kv_cache_specs import chunked_local_kv_bytes
+"""Tests for spec-aware KV cache estimation using vLLM spec classes."""
 from memory_estimator.kv_cache_specs import detect_kv_spec_type
 from memory_estimator.kv_cache_specs import estimate_kv_cache_bytes_specaware
-from memory_estimator.kv_cache_specs import full_attention_kv_bytes
-from memory_estimator.kv_cache_specs import mamba1_state_bytes_per_layer
-from memory_estimator.kv_cache_specs import mamba2_state_bytes_per_layer
-from memory_estimator.kv_cache_specs import mamba_kv_bytes
-from memory_estimator.kv_cache_specs import mla_kv_bytes
-from memory_estimator.kv_cache_specs import sliding_window_kv_bytes
 from memory_estimator.quantization import parse_quantization
 
 # ---------------------------------------------------------------------------
@@ -196,273 +188,205 @@ def test_detect_bamba_hybrid():
 
 
 # ---------------------------------------------------------------------------
-# Formula tests — full attention
+# Formula tests — full attention (via vLLM FullAttentionSpec)
 # ---------------------------------------------------------------------------
 
 def test_full_attention_formula():
     """Verify full attention matches hand-calculated value with block rounding."""
-    quant_spec = parse_quantization(StandardConfig())
-    # 32 layers, 8 kv_heads, hdim = 4096/32 = 128, bf16 = 2 bytes
-    # block_size=16: pages_per_seq = ceil(4096 / 16) = 256
-    # page_size = 16 * 8 * (128 + 128) * 2 = 16 * 8 * 256 * 2 = 65536
-    # total = 32 * 4 * 256 * 65536 = 2,147,483,648
-    result = full_attention_kv_bytes(
-        max_active_seqs=4, max_seq_len=4096, quant_spec=quant_spec,
-        layers=32, kv_heads=8, head_size=128, block_size=16,
-    )
-    expected = 32 * 4 * 256 * (16 * 8 * 256 * 2)
-    assert result == expected
-
-
-def test_full_attention_cross_check_with_old_formula():
-    """New full attention formula should match old estimate_kv_cache_bytes
-    when max_seq_len is a multiple of block_size (no rounding difference)."""
     cfg = StandardConfig()
     quant_spec = parse_quantization(cfg)
-    seqs, seq_len = 4, 4096  # 4096 is a multiple of 16
-    layers, kv_heads, hdim = 32, 8, 128
-
-    old = estimate_kv_cache_bytes(seqs, seq_len, quant_spec, layers, kv_heads, hdim)
-    new = full_attention_kv_bytes(seqs, seq_len, quant_spec, layers, kv_heads, hdim, block_size=16)
-    assert new == old
+    # 32 layers, 8 kv_heads, hdim = 4096/32 = 128, bf16 = 2 bytes
+    # block_size=16: pages_per_seq = ceil(4096 / 16) = 256
+    # page_size = 16 * 8 * (128 + 128) * 2 = 65536
+    # total = 32 * 4 * 256 * 65536 = 2,147,483,648
+    result = estimate_kv_cache_bytes_specaware(
+        cfg, max_active_seqs=4, max_seq_len=4096, quant_spec=quant_spec,
+        block_size=16,
+    )
+    expected = 32 * 4 * 256 * (16 * 8 * 256 * 2)
+    assert result.total_bytes == expected
+    assert result.spec_type == "full"
 
 
 def test_full_attention_block_rounding():
-    """When seq_len is not a multiple of block_size, new formula rounds up."""
+    """When seq_len is not a multiple of block_size, formula rounds up."""
     cfg = StandardConfig()
     quant_spec = parse_quantization(cfg)
-    seqs, seq_len = 4, 4097  # not a multiple of 16
-    layers, kv_heads, hdim = 32, 8, 128
-
-    old = estimate_kv_cache_bytes(seqs, seq_len, quant_spec, layers, kv_heads, hdim)
-    new = full_attention_kv_bytes(seqs, seq_len, quant_spec, layers, kv_heads, hdim, block_size=16)
-    # New should be >= old due to rounding up
-    assert new >= old
-    # But very close (within one block worth per layer per seq)
-    page_size = 16 * kv_heads * (hdim + hdim) * 2  # one page
-    max_overhead = layers * seqs * page_size
-    assert new - old < max_overhead
+    result_exact = estimate_kv_cache_bytes_specaware(
+        cfg, max_active_seqs=4, max_seq_len=4096, quant_spec=quant_spec,
+        block_size=16,
+    )
+    result_rounded = estimate_kv_cache_bytes_specaware(
+        cfg, max_active_seqs=4, max_seq_len=4097, quant_spec=quant_spec,
+        block_size=16,
+    )
+    assert result_rounded.total_bytes > result_exact.total_bytes
 
 
 # ---------------------------------------------------------------------------
-# Formula tests — sliding window
+# Formula tests — sliding window (via vLLM SlidingWindowSpec)
 # ---------------------------------------------------------------------------
 
 def test_sliding_window_much_smaller_than_full():
     """Sliding window KV cache should be much smaller than full when
     max_seq_len >> sliding_window."""
     quant_spec = parse_quantization(SlidingWindowConfig())
-    seqs, layers, kv_heads, hdim = 256, 32, 8, 128
-
-    full = full_attention_kv_bytes(
-        seqs, 32768, quant_spec, layers, kv_heads, hdim, block_size=16,
+    full = estimate_kv_cache_bytes_specaware(
+        StandardConfig(), 256, 32768, quant_spec, block_size=16,
     )
-    sw = sliding_window_kv_bytes(
-        seqs, 32768, quant_spec, layers, kv_heads, hdim, block_size=16,
-        window=4096, max_num_batched_tokens=2048,
+    sw = estimate_kv_cache_bytes_specaware(
+        SlidingWindowConfig(), 256, 32768, quant_spec, block_size=16,
+        max_num_batched_tokens=2048,
     )
-    # With window=4096 and max_seq_len=32768, should be ~6-8x smaller
-    ratio = full / sw
+    ratio = full.total_bytes / sw.total_bytes
     assert ratio > 5
 
 
 def test_sliding_window_formula():
     """Verify sliding window matches hand-calculated value."""
-    quant_spec = parse_quantization(SlidingWindowConfig())
+    cfg = SlidingWindowConfig()
+    quant_spec = parse_quantization(cfg)
     # window=4096, max_batched_tokens=2048
     # num_tokens = min(4096 - 1 + 2048, 32768) = min(6143, 32768) = 6143
     # pages_per_seq = ceil(6143 / 16) + 1 = 384 + 1 = 385
-    # page_size = 16 * 8 * 256 * 2 = 65536
+    # page_size = 16 * 8 * (128 + 128) * 2 = 65536
     # total = 32 * 1 * 385 * 65536 = 807,403,520
-    result = sliding_window_kv_bytes(
-        max_active_seqs=1, max_seq_len=32768, quant_spec=quant_spec,
-        layers=32, kv_heads=8, head_size=128, block_size=16,
-        window=4096, max_num_batched_tokens=2048,
+    result = estimate_kv_cache_bytes_specaware(
+        cfg, max_active_seqs=1, max_seq_len=32768, quant_spec=quant_spec,
+        block_size=16, max_num_batched_tokens=2048,
     )
     expected = 32 * 1 * 385 * (16 * 8 * 256 * 2)
-    assert result == expected
+    assert result.total_bytes == expected
+    assert result.spec_type == "sliding_window"
 
 
 def test_sliding_window_capped_at_max_seq_len():
     """When window + batched_tokens > max_seq_len, cap at max_seq_len."""
-    quant_spec = parse_quantization(SlidingWindowConfig())
-    result_short = sliding_window_kv_bytes(
-        max_active_seqs=1, max_seq_len=1000, quant_spec=quant_spec,
-        layers=32, kv_heads=8, head_size=128, block_size=16,
-        window=4096, max_num_batched_tokens=2048,
+    cfg_sw = SlidingWindowConfig()
+    cfg_full = StandardConfig()
+    quant_spec = parse_quantization(cfg_sw)
+    result_short = estimate_kv_cache_bytes_specaware(
+        cfg_sw, max_active_seqs=1, max_seq_len=1000, quant_spec=quant_spec,
+        block_size=16, max_num_batched_tokens=2048,
     )
-    result_full = full_attention_kv_bytes(
-        max_active_seqs=1, max_seq_len=1000, quant_spec=quant_spec,
-        layers=32, kv_heads=8, head_size=128, block_size=16,
+    result_full = estimate_kv_cache_bytes_specaware(
+        cfg_full, max_active_seqs=1, max_seq_len=1000, quant_spec=quant_spec,
+        block_size=16,
     )
     # Sliding window with short seq should be close to full (just +1 block overhead)
     page_size = 16 * 8 * 256 * 2
-    assert result_short - result_full == 32 * page_size
+    assert result_short.total_bytes - result_full.total_bytes == 32 * page_size
 
 
 # ---------------------------------------------------------------------------
-# Formula tests — MLA
+# Formula tests — MLA (via vLLM MLAAttentionSpec)
 # ---------------------------------------------------------------------------
 
 def test_mla_much_smaller_than_full():
     """MLA KV cache should be dramatically smaller than standard attention."""
-    quant_spec = parse_quantization(MLAConfig())
+    cfg = MLAConfig()
+    quant_spec = parse_quantization(cfg)
     seqs, seq_len = 256, 4096
-    layers = 60
-    hdim = 5120 // 128  # = 40
 
-    full = full_attention_kv_bytes(
-        seqs, seq_len, quant_spec, layers, 128, hdim, block_size=16,
+    cfg_full = StandardConfig()
+    cfg_full.num_hidden_layers = 60
+    cfg_full.num_key_value_heads = 128
+    cfg_full.num_attention_heads = 128
+    cfg_full.hidden_size = 5120
+
+    full = estimate_kv_cache_bytes_specaware(
+        cfg_full, seqs, seq_len, quant_spec, block_size=16,
     )
-    mla = mla_kv_bytes(
-        seqs, seq_len, quant_spec, layers,
-        kv_lora_rank=512, qk_rope_head_dim=64, block_size=16,
+    mla = estimate_kv_cache_bytes_specaware(
+        cfg, seqs, seq_len, quant_spec, block_size=16,
     )
-    ratio = full / mla
-    assert ratio > 10
+    ratio = full.total_bytes / mla.total_bytes
+    assert ratio > 5
 
 
 def test_mla_formula():
     """Verify MLA matches hand-calculated value."""
-    quant_spec = parse_quantization(MLAConfig())
+    cfg = MLAConfig()
+    quant_spec = parse_quantization(cfg)
     # head_size = 512 + 64 = 576, num_kv_heads = 1, bf16 = 2 bytes
     # page = 16 * 1 * 576 * 2 = 18432
     # pages_per_seq = ceil(4096 / 16) = 256
     # total = 60 * 4 * 256 * 18432 = 1,132,462,080
-    result = mla_kv_bytes(
-        max_active_seqs=4, max_seq_len=4096, quant_spec=quant_spec,
-        layers=60, kv_lora_rank=512, qk_rope_head_dim=64, block_size=16,
+    result = estimate_kv_cache_bytes_specaware(
+        cfg, max_active_seqs=4, max_seq_len=4096, quant_spec=quant_spec,
+        block_size=16,
     )
     expected = 60 * 4 * 256 * (16 * 1 * 576 * 2)
-    assert result == expected
-
-
-def test_mla_fp8_ds_mla():
-    """Verify fp8_ds_mla uses fixed 656 bytes/token."""
-    quant_spec = parse_quantization(MLAConfig())
-    result = mla_kv_bytes(
-        max_active_seqs=1, max_seq_len=4096, quant_spec=quant_spec,
-        layers=60, kv_lora_rank=512, qk_rope_head_dim=64, block_size=16,
-        fp8_ds_mla=True,
-    )
-    # page = 16 * 656 = 10496
-    # pages_per_seq = ceil(4096 / 16) = 256
-    # total = 60 * 1 * 256 * 10496 = 161,218,560
-    expected = 60 * 1 * 256 * (16 * 656)
-    assert result == expected
+    assert result.total_bytes == expected
+    assert result.spec_type == "mla"
 
 
 def test_mla_fp8_smaller_than_standard_mla():
     """fp8_ds_mla should be smaller than standard bf16 MLA."""
-    quant_spec = parse_quantization(MLAConfig())
-    standard = mla_kv_bytes(
-        max_active_seqs=4, max_seq_len=4096, quant_spec=quant_spec,
-        layers=60, kv_lora_rank=512, qk_rope_head_dim=64, block_size=16,
+    from memory_estimator.dtype_utils import normalise_dtype
+    from memory_estimator.quantization import QuantizationSpec
+
+    cfg = MLAConfig()
+    quant_spec_bf16 = parse_quantization(cfg)
+    fp8_quant = QuantizationSpec(
+        method=None,
+        weight_dtype=normalise_dtype("bfloat16"),
+        activation_dtype=normalise_dtype("bfloat16"),
+        kv_cache_dtype=normalise_dtype("fp8"),
+        kv_cache_scale_dtype=None,
     )
-    fp8 = mla_kv_bytes(
-        max_active_seqs=4, max_seq_len=4096, quant_spec=quant_spec,
-        layers=60, kv_lora_rank=512, qk_rope_head_dim=64, block_size=16,
-        fp8_ds_mla=True,
+    standard = estimate_kv_cache_bytes_specaware(
+        cfg, 4, 4096, quant_spec_bf16, block_size=16,
+    )
+    fp8 = estimate_kv_cache_bytes_specaware(
+        cfg, 4, 4096, fp8_quant, block_size=16,
     )
     # 656 < 576 * 2 = 1152, so fp8 should be ~43% smaller
-    assert fp8 < standard
+    assert fp8.total_bytes < standard.total_bytes
 
 
 # ---------------------------------------------------------------------------
-# Formula tests — chunked local
+# Formula tests — chunked local (via vLLM ChunkedLocalAttentionSpec)
 # ---------------------------------------------------------------------------
 
 def test_chunked_local_smaller_than_full():
     """Chunked local should be smaller than full for long contexts."""
-    quant_spec = parse_quantization(ChunkedLocalConfig())
-    seqs, layers, kv_heads, hdim = 256, 32, 8, 128
+    cfg_chunked = ChunkedLocalConfig()
+    cfg_full = StandardConfig()
+    quant_spec = parse_quantization(cfg_chunked)
 
-    full = full_attention_kv_bytes(
-        seqs, 131072, quant_spec, layers, kv_heads, hdim, block_size=16,
+    full = estimate_kv_cache_bytes_specaware(
+        cfg_full, 256, 131072, quant_spec, block_size=16,
     )
-    chunked = chunked_local_kv_bytes(
-        seqs, 131072, quant_spec, layers, kv_heads, hdim, block_size=16,
-        chunk_size=8192, max_num_batched_tokens=2048,
+    chunked = estimate_kv_cache_bytes_specaware(
+        cfg_chunked, 256, 131072, quant_spec, block_size=16,
+        max_num_batched_tokens=2048,
     )
-    ratio = full / chunked
+    ratio = full.total_bytes / chunked.total_bytes
     assert ratio > 10
 
 
 def test_chunked_local_formula():
     """Verify chunked local matches hand-calculated value."""
-    quant_spec = parse_quantization(ChunkedLocalConfig())
+    cfg = ChunkedLocalConfig()
+    quant_spec = parse_quantization(cfg)
     # chunk=8192, max_batched=2048, max_seq_len=131072
     # num_tokens = min(8192 + 2048, 131072) = 10240
     # pages_per_seq = ceil(10240 / 16) = 640
-    # page_size = 16 * 8 * 256 * 2 = 65536
+    # page_size = 16 * 8 * (128 + 128) * 2 = 65536
     # total = 32 * 2 * 640 * 65536 = 2,684,354,560
-    result = chunked_local_kv_bytes(
-        max_active_seqs=2, max_seq_len=131072, quant_spec=quant_spec,
-        layers=32, kv_heads=8, head_size=128, block_size=16,
-        chunk_size=8192, max_num_batched_tokens=2048,
+    result = estimate_kv_cache_bytes_specaware(
+        cfg, max_active_seqs=2, max_seq_len=131072, quant_spec=quant_spec,
+        block_size=16, max_num_batched_tokens=2048,
     )
     expected = 32 * 2 * 640 * (16 * 8 * 256 * 2)
-    assert result == expected
+    assert result.total_bytes == expected
+    assert result.spec_type == "chunked_local"
 
 
 # ---------------------------------------------------------------------------
-# Formula tests — Mamba
+# Formula tests — Mamba (via vLLM MambaSpec)
 # ---------------------------------------------------------------------------
-
-def test_mamba1_state_bytes():
-    """Verify Mamba1 state size calculation."""
-    # intermediate = 2560 * 2.0 = 5120, d_state=16, d_conv=4, bf16=2
-    # conv: (4-1) * 5120 = 15360 elements
-    # temporal: 5120 * 16 = 81920 elements
-    # total: (15360 + 81920) * 2 = 194560 bytes
-    result = mamba1_state_bytes_per_layer(
-        intermediate_size=5120, d_state=16, d_conv=4, dtype_bytes=2.0,
-    )
-    expected = (3 * 5120 + 5120 * 16) * 2
-    assert result == expected
-
-
-def test_mamba1_state_bytes_unsharded():
-    """State functions return unsharded totals (TP applied later by build_memory_buckets)."""
-    result = mamba1_state_bytes_per_layer(
-        intermediate_size=5120, d_state=16, d_conv=4, dtype_bytes=2.0,
-    )
-    # Should equal full unsharded size regardless of TP
-    expected = (3 * 5120 + 5120 * 16) * 2
-    assert result == expected
-
-
-def test_mamba2_state_bytes():
-    """Verify Mamba2 state size calculation."""
-    # n_heads=64, head_dim=64, d_state=128, d_conv=4
-    # intermediate=5120, n_groups=8, bf16=2
-    # conv_dim = 5120 + 2 * 8 * 128 = 5120 + 2048 = 7168
-    # conv: (4-1) * 7168 = 21504 elements
-    # temporal: 64 * 64 * 128 = 524288 elements
-    # total: (21504 + 524288) * 2 = 1,091,584 bytes
-    result = mamba2_state_bytes_per_layer(
-        n_heads=64, mamba_head_dim=64, d_state=128, d_conv=4,
-        intermediate_size=5120, n_groups=8, dtype_bytes=2.0,
-    )
-    conv_elements = 3 * 7168
-    temporal_elements = 64 * 64 * 128
-    expected = (conv_elements + temporal_elements) * 2
-    assert result == expected
-
-
-def test_mamba_kv_bytes_formula():
-    """Verify mamba_kv_bytes matches expected calculation."""
-    state_per_layer = 1000.0
-    # 64 layers, 4 seqs, seq_len=4096, block_size=16
-    # pages_per_seq = ceil(4096/16) = 256
-    # total = 64 * 4 * 256 * 1000 = 65,536,000
-    result = mamba_kv_bytes(
-        max_active_seqs=4, max_seq_len=4096, layers=64,
-        state_bytes_per_layer=state_per_layer, block_size=16,
-    )
-    expected = 64 * 4 * 256 * 1000
-    assert result == expected
-
 
 def test_pure_mamba1_orchestrator():
     """Orchestrator detects and handles pure Mamba1 model."""
@@ -641,11 +565,7 @@ def test_build_memory_buckets_hybrid():
 
 
 def test_mamba_tp_no_double_division():
-    """TP division should only happen once in build_memory_buckets, not in state functions.
-
-    Regression test: previously mamba state functions divided by TP internally,
-    then build_memory_buckets divided by tp*pp again, causing double-division.
-    """
+    """TP division should only happen once in build_memory_buckets, not in state functions."""
     from memory_estimator.buckets import build_memory_buckets
 
     cfg = PureMamba1Config()

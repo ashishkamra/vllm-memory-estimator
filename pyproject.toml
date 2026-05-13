@@ -14,12 +14,10 @@ license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = [
     "huggingface_hub>=0.20.0",
+    "vllm>=0.8.0",
 ]
 
 [project.optional-dependencies]
-vllm = [
-    "vllm>=0.5.4",
-]
 dev = [
     "pytest>=8.2.0",
     "ruff>=0.6.4",
