@@ -125,8 +125,14 @@ class BudgetResult:
             dims.append(f"DP={self.data_parallel_size}")
         if self.enable_expert_parallel:
             dims.append("EP")
-        dim_str = f", {', '.join(dims)}" if dims else ""
-        header += f" ({gpu_mem:.1f} GiB per GPU{dim_str})"
+
+        lines: list[str] = [header]
+        if self.total_gpus > 1:
+            dim_str = ", ".join(dims)
+            lines.append(f"  {self.total_gpus} GPUs ({dim_str}) — {gpu_mem:.1f} GiB per GPU")
+        else:
+            lines.append(f"  {gpu_mem:.1f} GiB GPU")
+        lines.append("")
 
         col_headers = [f"{sc} seq" for sc in self.seq_counts] + ["Max Seqs"]
         col_w = max(max((len(h) for h in col_headers), default=7), 7)
@@ -143,7 +149,7 @@ class BudgetResult:
         hdr_line = "│".join(hdr_parts)
 
         border = "═" * len(sep_line)
-        lines = [header, border, hdr_line, sep_line]
+        lines.extend([border, hdr_line, sep_line])
 
         for row_idx, sl in enumerate(self.seq_lengths):
             parts = [f"{sl:>{row_label_w},} "]
@@ -165,7 +171,7 @@ class BudgetResult:
             lines.append("│".join(parts))
 
         lines.append(border)
-        lines.append(f"Values: estimated per-GPU memory (GiB). --- = exceeds {gpu_mem:.1f} GiB.")
+        lines.append(f"Each cell: estimated memory per GPU (GiB). --- = exceeds {gpu_mem:.1f} GiB limit.")
         return "\n".join(lines)
 
     def render_html(self) -> str:
@@ -283,6 +289,27 @@ def compute_budget(
     )
 
 
+def _gpu_banner_html(result: BudgetResult) -> str:
+    if result.total_gpus <= 1:
+        return ""
+    dims: list[str] = []
+    if result.tensor_parallel_size > 1:
+        dims.append(f"TP={result.tensor_parallel_size}")
+    if result.pipeline_parallel_size > 1:
+        dims.append(f"PP={result.pipeline_parallel_size}")
+    if result.data_parallel_size > 1:
+        dims.append(f"DP={result.data_parallel_size}")
+    if result.enable_expert_parallel:
+        dims.append("EP")
+    return (
+        f'<div class="gpu-banner">'
+        f'<strong>{result.total_gpus} GPUs</strong> ({", ".join(dims)}) &mdash; '
+        f'all values below are <strong>per GPU</strong> '
+        f'({result.gpu_memory_gib:.1f} GiB each)'
+        f'</div>'
+    )
+
+
 def _render_html_report(result: BudgetResult) -> str:
     esc = html_mod.escape
     gpu_mem = result.gpu_memory_gib
@@ -354,14 +381,18 @@ def _render_html_report(result: BudgetResult) -> str:
   .row-label {{ font-weight: 600; text-align: right; background: #f8f9fa; }}
   .max-seqs {{ font-weight: 600; background: #e7f5ff; }}
   .footer {{ margin-top: 1em; font-size: 0.85em; color: #888; }}
+  .gpu-banner {{ background: #e7f5ff; border: 1px solid #74c0fc; border-radius: 8px;
+                 padding: 0.8em 1.2em; margin-bottom: 1.5em; font-size: 0.95em; }}
+  .gpu-banner strong {{ font-size: 1.1em; }}
 </style>
 </head>
 <body>
 <h1>Token Budget: {esc(result.model_id)}</h1>
+{_gpu_banner_html(result)}
 <div class="summary">
   <div class="card">
-    <div class="label">GPU Memory</div>
-    <div class="value">{gpu_mem:.1f} GiB</div>
+    <div class="label">GPU Memory Limit</div>
+    <div class="value">{gpu_mem:.1f} GiB / GPU</div>
   </div>
   <div class="card">
     <div class="label">Parallelism</div>
@@ -393,7 +424,7 @@ def _render_html_report(result: BudgetResult) -> str:
 </tbody>
 </table>
 <p class="footer">
-  Values: estimated per-GPU memory (GiB). <b>---</b> = exceeds {gpu_mem:.1f} GiB limit.
+  Each cell shows estimated <b>per-GPU</b> memory (GiB). <b>---</b> = exceeds {gpu_mem:.1f} GiB limit.
   Hover over cells for component breakdown.
 </p>
 </body>

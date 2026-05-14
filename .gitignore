@@ -11,3 +11,6 @@ test_data/validation_db.json
 test_data/validation_report.json
 test_data/validation_report.html
 node_modules/
+package-lock.json
+web/node_modules/
+web/dist/
