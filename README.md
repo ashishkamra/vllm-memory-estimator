@@ -1,21 +1,18 @@
 # vllm-memory-estimator
 
-A lightweight, offline utility that estimates GPU memory requirements for serving
-Hugging Face models with [vLLM](https://github.com/vllm-project/vllm).
+A utility that estimates GPU memory requirements for serving Hugging Face models
+with [vLLM](https://github.com/vllm-project/vllm). Two modes:
 
-You pass your `vllm serve` command as a quoted string. The tool parses
-memory-relevant flags (model, sequence length, batch size, dtype, parallelism,
-etc.), reads model metadata from Hugging Face — no GPU or weight download
-required — and produces lower/upper per-GPU ranges for every memory component:
-parameters, activations, KV cache, workspace, and vLLM runtime overhead (CUDA
-graphs, block tables, worker buffers).
+- **Estimate** — pass a `vllm serve` command and get per-GPU memory breakdowns
+- **Budget** — given a model and GPU memory, see what context lengths and
+  concurrency levels fit
+
+Reads model metadata from Hugging Face (no weight download required) and uses
+vLLM's actual KV cache spec classes for accurate cache estimation.
 
 Supports tensor parallelism (TP), pipeline parallelism (PP), data parallelism
 (DP), and expert parallelism (EP) for MoE models — including DeepSeek-style
 DP+EP (Wide EP) where attention is replicated and experts are distributed.
-
-The only runtime dependency is `huggingface_hub`. No torch, transformers, or
-vLLM installation needed.
 
 ## Installation
 
@@ -29,12 +26,23 @@ For development (tests + linting):
 pip install -e ".[dev]"
 ```
 
+### Dependencies
+
+- `huggingface_hub>=0.20.0` — model config and safetensors header fetching
+- `vllm>=0.8.0` — KV cache spec classes for accurate cache estimation
+
 ## Usage
 
-### CLI
+### CLI — Memory Estimation
 
 Pass your `vllm serve` command directly — unknown flags like `--host` or
 `--port` are silently ignored:
+
+```bash
+memory-estimator estimate "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50"
+```
+
+The `estimate` subcommand is the default, so bare usage still works:
 
 ```bash
 memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50"
@@ -54,48 +62,85 @@ Total (raw)     :  68.55 GiB (64.91 – 72.70)
 vLLM overhead   :   8.01 GiB ( 4.00 – 16.01)
 ----------------------------------
 Total (vLLM)    :  76.56 GiB (68.92 – 88.71)
-
-Context:
-  Model architecture : gpt_oss
-  Parameter count    : 63.081 B
-  Quantization       : mxfp4
-  Weight dtype       : mxfp4
-  Activation dtype   : float16
-  KV cache dtype     : float16
-  Max active sequences: 50
-  Max sequence length: 2000
-  Enforce eager      : False
 ```
 
 Each row shows a nominal estimate plus a (lower – upper) confidence range.
 
-Use `--kv-cache-dtype fp8` to halve KV cache memory, or parallelism flags to
-see per-GPU estimates:
-
-```bash
-# FP8 KV cache — halves KV cache memory
-memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50 --kv-cache-dtype fp8"
-
-# Tensor parallelism — shows per-GPU + total cluster memory
-memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50 -tp 2"
-
-# Pipeline parallelism — splits layers across GPUs
-memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50 -tp 2 -pp 2"
-
-# Data parallelism — full replica per GPU, fewer sequences per rank
-memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 200 --data-parallel-size 4"
-
-# Expert parallelism (MoE) — distributes experts, replicates attention
-memory-estimator "vllm serve deepseek-ai/DeepSeek-V3 --max-model-len 4096 -tp 2 --data-parallel-size 4 --enable-expert-parallel"
-```
-
 Add `--json` for machine-readable output:
 
 ```bash
-memory-estimator "vllm serve openai/gpt-oss-120b --max-model-len 2000 --max-num-seqs 50" --json
+memory-estimator estimate "vllm serve openai/gpt-oss-120b --max-model-len 2000" --json
 ```
 
-### Supported vLLM flags
+### CLI — Token Budget Matrix
+
+Compute a matrix showing what fits on your GPU across context lengths and
+concurrency levels:
+
+```bash
+memory-estimator budget --model meta-llama/Llama-3.1-8B --gpu-memory-gib 80
+```
+
+Sample output:
+
+```
+Token Budget: meta-llama/Llama-3.1-8B (80.0 GiB per GPU)
+════════════════════════════════════════════════════════════════════════════
+  Context │   1 seq │   4 seq │   8 seq │  16 seq │  64 seq │ 256 seq │ Max Seqs
+──────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────
+      256 │   16.1  │   16.1  │   16.1  │   16.1  │   16.2  │   16.7  │   4096+
+    4,096 │   16.2  │   16.4  │   16.6  │   17.0  │   18.5  │   24.8  │    1258
+   32,768 │   17.1  │   19.0  │   20.8  │   24.4  │   35.0  │   77.5  │     296
+  131,072 │   19.5  │   27.2  │   34.9  │   50.2  │    ---  │    ---  │      74
+════════════════════════════════════════════════════════════════════════════
+Values: estimated per-GPU memory (GiB). --- = exceeds 80.0 GiB.
+```
+
+With parallelism and quantization:
+
+```bash
+memory-estimator budget --model meta-llama/Llama-3.1-70B --gpu-memory-gib 80 --tp 4
+memory-estimator budget --model meta-llama/Llama-3.1-70B --gpu-memory-gib 80 --tp 4 -q fp8
+```
+
+Custom sweep ranges:
+
+```bash
+memory-estimator budget --model meta-llama/Llama-3.1-8B --gpu-memory-gib 80 \
+    --seq-lengths 1024,4096,8192,32768 \
+    --seq-counts 1,32,128,512
+```
+
+Output options:
+
+```bash
+memory-estimator budget --model meta-llama/Llama-3.1-8B --gpu-memory-gib 80 --json
+memory-estimator budget --model meta-llama/Llama-3.1-8B --gpu-memory-gib 80 --html budget.html
+```
+
+### Budget CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--model` | HuggingFace model ID (required) |
+| `--gpu-memory-gib` | Available GPU memory in GiB (required) |
+| `--tp` / `--tensor-parallel-size` | Tensor parallelism degree |
+| `--pp` / `--pipeline-parallel-size` | Pipeline parallelism degree |
+| `--dp` / `--data-parallel-size` | Data parallelism degree |
+| `--enable-expert-parallel` | Enable expert parallelism (MoE) |
+| `-q` / `--quantization` | Quantization method |
+| `--dtype` | Activation dtype override |
+| `--kv-cache-dtype` | KV cache dtype override |
+| `--enforce-eager` | Disable CUDA graphs |
+| `--block-size` | Paged attention block size |
+| `--max-num-batched-tokens` | Tokens per forward pass |
+| `--seq-lengths` | Comma-separated context lengths to sweep |
+| `--seq-counts` | Comma-separated concurrency levels to sweep |
+| `--json` | Output as JSON |
+| `--html FILE` | Write HTML report to file |
+| `--no-cache` | Force re-fetch model metadata |
+
+### Supported vLLM flags (estimate mode)
 
 The estimator parses these memory-relevant flags from the `vllm serve` command.
 Unknown flags (e.g. `--host`, `--port`) are silently ignored.
@@ -119,24 +164,48 @@ Unknown flags (e.g. `--host`, `--port`) are silently ignored.
 
 ### Python API
 
+The package exposes a clean programmatic API for use in scripts, notebooks, and
+web applications:
+
 ```python
-from memory_estimator.estimator import EstimatorInputs, estimate_from_inputs
+from memory_estimator import EstimatorInputs, estimate_from_inputs
 
 summary, estimate = estimate_from_inputs(
     EstimatorInputs(
-        model_id="openai/gpt-oss-120b",
-        max_seq_len=2000,
-        max_active_seqs=50,
-        kv_cache_dtype="fp8",
+        model_id="meta-llama/Llama-3.1-8B",
+        max_seq_len=4096,
+        max_active_seqs=256,
         tensor_parallel_size=2,
-        pipeline_parallel_size=1,
-        data_parallel_size=1,
-        enable_expert_parallel=False,
     )
 )
 
 print(estimate.render_table())
-print(f"Per GPU (vLLM): {estimate.total_with_vllm.nominal_gib:.2f} GiB")
+print(f"Per GPU: {estimate.total_with_vllm.nominal_gib:.2f} GiB")
+print(estimate.as_dict())  # JSON-serializable
+```
+
+Token budget matrix:
+
+```python
+from memory_estimator import compute_budget
+
+result = compute_budget(
+    "meta-llama/Llama-3.1-8B",
+    gpu_memory_gib=80.0,
+    tensor_parallel_size=4,
+    seq_lengths=[1024, 4096, 16384, 65536],
+    seq_counts=[1, 32, 128, 512],
+)
+
+print(result.render_table())          # terminal table
+print(result.as_dict())               # JSON-serializable dict
+print(result.render_html())           # self-contained HTML page
+
+# Programmatic lookups
+cell = result.cell(4096, 128)         # specific cell
+print(cell.total_memory_gib, cell.fits)
+
+max_seqs = result.max_seqs_at(4096)   # max concurrent seqs at this context
 ```
 
 The `estimate` object exposes each component as a `MemoryComponentEstimate`
@@ -149,8 +218,6 @@ with `nominal_gib`, `lower_gib`, and `upper_gib` fields:
 - `estimate.vllm_overhead` — CUDA graphs + block tables + worker overhead
 - `estimate.total` — sum of first four (raw model memory)
 - `estimate.total_with_vllm` — total including vLLM runtime overhead
-
-Use `estimate.as_dict()` for a serialisable dictionary.
 
 ## How It Works
 
@@ -172,8 +239,10 @@ Use `estimate.as_dict()` for a serialisable dictionary.
    - Logits buffer (`tokens × vocab_size × bytes`)
    - MoE expert buffers (when applicable)
 
-5. **KV cache estimation** — Straightforward formula:
-   `layers × sequences × seq_len × kv_heads × head_dim × 2 × dtype_bytes`
+5. **KV cache estimation** — Uses vLLM's actual `KVCacheSpec` classes
+   (`FullAttentionSpec`, `SlidingWindowSpec`, `MLAAttentionSpec`,
+   `ChunkedLocalAttentionSpec`, `MambaSpec`) for accurate cache sizing.
+   Supports hybrid models with mixed layer types.
 
 6. **vLLM overhead estimation** — Models three runtime components:
    - **CUDA graphs**: proportional to parameter size and layer count
@@ -190,8 +259,8 @@ Use `estimate.as_dict()` for a serialisable dictionary.
    | **DP** | unchanged | seqs/DP | seqs/DP |
    | **EP** (MoE) | attention replicated, experts /(TP×DP) | /TP | /TP |
 
-   For MoE models with EP enabled, expert vs non-expert parameters are
-   identified by tensor name from the safetensors headers.
+   Vision encoders and multimodal projectors are replicated across TP ranks
+   (not sharded), matching vLLM's behavior.
 
 8. **Range construction** — Each component gets a confidence range to account
    for runtime variability (allocator fragmentation, framework overhead, etc.).
@@ -210,7 +279,9 @@ Use `estimate.as_dict()` for a serialisable dictionary.
 
 ```
 src/memory_estimator/
-├── cli.py               # Command-line interface
+├── __init__.py          # Public API exports
+├── cli.py               # Subcommand-based CLI (estimate + budget)
+├── budget.py            # Token budget matrix computation
 ├── vllm_cmd_parser.py   # vllm serve command string parser
 ├── estimator.py         # High-level API (EstimatorInputs → MemoryEstimate)
 ├── buckets.py           # Memory accounting by category
@@ -218,6 +289,7 @@ src/memory_estimator/
 ├── model_summary.py     # ModelSummary intermediate representation
 ├── model_shapes.py      # Safetensors-based parameter shape collection
 ├── quantization.py      # Quantization config parsing
+├── kv_cache_specs.py    # KV cache estimation via vLLM spec classes
 ├── config_utils.py      # Architecture attribute resolution
 ├── dtype_utils.py       # Dtype normalisation and byte-width helpers
 └── vllm_defaults.py     # vLLM-specific constants
@@ -225,8 +297,10 @@ src/memory_estimator/
 tests/
 ├── conftest.py               # Shared fixtures and CLI options
 ├── test_buckets.py           # Unit tests for memory bucket calculations
+├── test_budget.py            # Unit tests for token budget matrix
 ├── test_cli.py               # CLI argument parsing tests
 ├── test_dtype_utils.py       # Unit tests for dtype utilities
+├── test_kv_cache_specs.py    # KV cache spec detection and formula tests
 ├── test_quantization.py      # Unit tests for quantization parsing
 ├── test_vllm_cmd_parser.py   # vllm serve command parser tests
 ├── test_memory_profile.py    # GPU integration test (PyTorch runtime comparison)
@@ -251,15 +325,7 @@ Require a CUDA GPU. Compare estimated vs actual memory usage:
 python -m pytest tests/test_memory_profile.py -v -m cuda --profile-report
 
 # vLLM benchmark comparison (requires vLLM installed)
-pip install -e ".[vllm,dev]"
 python -m pytest tests/test_vllm_profile.py -v -s --profile-report
-
-# Specify a different model
-python -m pytest tests/test_vllm_profile.py -v -s \
-    --profile-model openai-community/gpt2 \
-    --profile-max-seq-len 256 \
-    --profile-max-active-seqs 4 \
-    --profile-report
 ```
 
 ### Linting
@@ -275,13 +341,15 @@ standard architecture attributes (`hidden_size`, `num_hidden_layers`,
 `num_attention_heads`, etc.) and publishes weights in safetensors format. This
 includes most decoder-only architectures:
 
-- LLaMA / Llama 2 / Llama 3 family
+- LLaMA / Llama 2 / Llama 3 / Llama 4 family
 - GPT-2 / GPT-NeoX / OPT
 - Mistral / Mixtral (MoE)
-- Qwen / Qwen2
+- DeepSeek V2 / V3 / R1 (MLA + MoE)
+- Qwen / Qwen2 / Qwen3
 - Phi / Phi-3
-- Falcon
+- Falcon / Falcon-H1 (hybrid Mamba)
 - Gemma
+- Jamba (hybrid Mamba + Attention)
 
 Quantized checkpoints (GPTQ, AWQ, compressed-tensors, FP8, MXFP4) are handled
 automatically when `quantization_config` is present in the model config.
@@ -289,8 +357,6 @@ automatically when `quantization_config` is present in the model config.
 ## Notes and Limitations
 
 - The estimator runs entirely on CPU — no GPU is needed.
-- The only dependency is `huggingface_hub`. No torch, transformers, or vLLM
-  needed for estimation.
 - Parameter memory is the exact on-disk size from safetensors file headers.
   Models without safetensors files are not supported.
 - Actual runtime consumption can exceed estimates due to CUDA allocator
