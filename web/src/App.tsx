@@ -22,14 +22,14 @@ export default function App() {
           <TabsTrigger value="budget">Token Budget</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="estimate">
+        <TabsContent value="estimate" forceMount className="data-[state=inactive]:hidden">
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-[380px_1fr]">
             <EstimateForm onResult={setEstimateResult} />
             <EstimateResult data={estimateResult} />
           </div>
         </TabsContent>
 
-        <TabsContent value="budget">
+        <TabsContent value="budget" forceMount className="data-[state=inactive]:hidden">
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-[380px_1fr]">
             <BudgetForm onResult={setBudgetResult} />
             <BudgetMatrix data={budgetResult} />
