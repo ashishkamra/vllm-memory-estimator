@@ -30,6 +30,7 @@ class ModelSummary:
     enable_expert_parallel: bool = False
     expert_bytes: int = 0
     non_expert_bytes: int = 0
+    replicated_bytes: int = 0
     block_size: int | None = None
 
     @property

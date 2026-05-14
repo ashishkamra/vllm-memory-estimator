@@ -118,6 +118,7 @@ def build_memory_buckets(
     enable_expert_parallel: bool = False,
     expert_bytes: float = 0.0,
     non_expert_bytes: float = 0.0,
+    replicated_bytes: float = 0.0,
     block_size: int | None = None,
 ) -> MemoryBuckets:
     tp = tensor_parallel_size
@@ -153,11 +154,15 @@ def build_memory_buckets(
     workspace = activations * WORKSPACE_FRACTION
 
     # --- Per-GPU parameter bytes ---
+    # Replicated tensors (vision encoders, projectors) are loaded on every
+    # GPU without sharding, so they are NOT divided by TP.
+    shardable_bytes = total_params - replicated_bytes
     if enable_expert_parallel and expert_bytes > 0:
         ep_size = tp * dp
         params = (non_expert_bytes / tp + expert_bytes / ep_size) / pp
     else:
-        params = total_params / (tp * pp)
+        params = shardable_bytes / (tp * pp)
+    params += replicated_bytes
 
     # --- Per-GPU KV cache and activations ---
     kv_cache /= (tp * pp)

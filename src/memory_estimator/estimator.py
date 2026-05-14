@@ -116,17 +116,26 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
 
     quant_spec = parse_quantization(config, cli_quantization=inputs.quantization)
     quant_spec = _apply_dtype_overrides(inputs, quant_spec)
-    parameter_shapes, precomputed_bytes, expert_bytes, non_expert_bytes = (
-        collect_parameter_shapes(
-            inputs.model_id, revision=inputs.revision, use_cache=inputs.use_cache,
+    parameter_shapes, precomputed_bytes, expert_bytes, non_expert_bytes, \
+        replicated_bytes, disk_bytes_per_element = (
+            collect_parameter_shapes(
+                inputs.model_id, revision=inputs.revision, use_cache=inputs.use_cache,
+            )
         )
-    )
+
+    # When on-disk dtype is larger than the runtime dtype vLLM will use
+    # (e.g. F32 on disk but BF16 at runtime), scale parameter bytes down.
+    runtime_bpe = quant_spec.weight_dtype.bits / 8
+    if disk_bytes_per_element > runtime_bpe and not quant_spec.is_quantized:
+        scale = runtime_bpe / disk_bytes_per_element
+        precomputed_bytes = int(precomputed_bytes * scale)
+        expert_bytes = int(expert_bytes * scale)
+        non_expert_bytes = int(non_expert_bytes * scale)
+        replicated_bytes = int(replicated_bytes * scale)
 
     # When CLI quantization implies a smaller weight dtype than what's on
     # disk, scale parameter bytes to reflect runtime GPU memory rather than
-    # on-disk size.  This is an approximation — embedding and norm layers
-    # typically stay in the original precision, but the bulk of parameters
-    # (attention + MLP weights) do get quantized.
+    # on-disk size.
     if inputs.quantization:
         base_spec = parse_quantization(config)
         if quant_spec.weight_dtype.bits < base_spec.weight_dtype.bits:
@@ -134,6 +143,7 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
             precomputed_bytes = int(precomputed_bytes * scale)
             expert_bytes = int(expert_bytes * scale)
             non_expert_bytes = int(non_expert_bytes * scale)
+            replicated_bytes = int(replicated_bytes * scale)
 
     return ModelSummary(
         model_id=inputs.model_id,
@@ -152,6 +162,7 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
         enable_expert_parallel=inputs.enable_expert_parallel,
         expert_bytes=expert_bytes,
         non_expert_bytes=non_expert_bytes,
+        replicated_bytes=replicated_bytes,
         block_size=inputs.block_size,
     )
 
@@ -172,6 +183,7 @@ def estimate_memory(summary: ModelSummary) -> MemoryEstimate:
         enable_expert_parallel=summary.enable_expert_parallel,
         expert_bytes=summary.expert_bytes,
         non_expert_bytes=summary.non_expert_bytes,
+        replicated_bytes=summary.replicated_bytes,
         block_size=summary.block_size,
     )
     return build_estimate(
