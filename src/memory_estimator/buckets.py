@@ -165,7 +165,8 @@ def build_memory_buckets(
     params += replicated_bytes
 
     # --- Per-GPU KV cache and activations ---
-    kv_cache /= (tp * pp)
+    if not kv_result.per_gpu:
+        kv_cache /= (tp * pp)
     activations /= tp       # PP doesn't reduce per-stage activation peak
     workspace /= tp
 

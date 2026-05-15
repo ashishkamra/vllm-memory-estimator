@@ -254,10 +254,14 @@ with `nominal_gib`, `lower_gib`, and `upper_gib` fields:
 
    | Strategy | Weights | KV Cache | Activations |
    |----------|---------|----------|-------------|
-   | **TP** | /TP | /TP | /TP |
-   | **PP** | /PP | /PP | unchanged |
+   | **TP** | /TP | /TP (full attention) or unchanged (MLA/Mamba) | /TP |
+   | **PP** | /PP | /PP (full attention) or unchanged (MLA/Mamba) | unchanged |
    | **DP** | unchanged | seqs/DP | seqs/DP |
    | **EP** (MoE) | attention replicated, experts /(TP×DP) | /TP | /TP |
+
+   MLA (Multi-Latent Attention) and Mamba/SSM state are per-GPU — each GPU
+   holds the full latent or state-space representation, so KV cache is not
+   divided by TP for these architectures.
 
    Vision encoders and multimodal projectors are replicated across TP ranks
    (not sharded), matching vLLM's behavior.
@@ -292,6 +296,8 @@ src/memory_estimator/
 ├── kv_cache_specs.py    # KV cache estimation via vLLM spec classes
 ├── config_utils.py      # Architecture attribute resolution
 ├── dtype_utils.py       # Dtype normalisation and byte-width helpers
+├── validation_runner.py # Validation against vLLM runtime logs
+├── validation_db.py     # Build validation DB from CSV + log files
 └── vllm_defaults.py     # vLLM-specific constants
 
 tests/
@@ -303,6 +309,9 @@ tests/
 ├── test_kv_cache_specs.py    # KV cache spec detection and formula tests
 ├── test_quantization.py      # Unit tests for quantization parsing
 ├── test_vllm_cmd_parser.py   # vllm serve command parser tests
+├── test_validation.py        # Validation framework tests
+├── test_validation_db.py     # Validation DB builder tests
+├── test_validation_runner.py # Validation runner and report tests
 ├── test_memory_profile.py    # GPU integration test (PyTorch runtime comparison)
 └── test_vllm_profile.py      # vLLM integration test (validates against vllm bench)
 ```
@@ -353,6 +362,25 @@ includes most decoder-only architectures:
 
 Quantized checkpoints (GPTQ, AWQ, compressed-tensors, FP8, MXFP4) are handled
 automatically when `quantization_config` is present in the model config.
+
+## Validation
+
+The estimator is validated against real vLLM startup logs from 233 deployment
+records across 23 models. Run the validation suite:
+
+```bash
+python scripts/run_validation.py
+python scripts/run_validation.py --html test_data/validation_report.html
+```
+
+The report compares two memory components against vLLM runtime data:
+
+- **Weights** — estimated vs actual `model_load_gib` from vLLM logs
+- **KV cache** — estimated vs actual per-token KV cache bytes (derived from
+  `available_kv_cache_gib / kv_cache_tokens` in logs)
+
+Current accuracy (May 2025): **94.8% of weight estimates within bounds**, 2.1%
+mean weight error, <1% KV per-token error for most model families.
 
 ## Notes and Limitations
 

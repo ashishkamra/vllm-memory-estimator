@@ -46,6 +46,7 @@ class ComparisonResult:
     actual_kv_per_token_bytes: float | None
     estimated_kv_per_token_bytes: float | None
     kv_per_token_ratio: float | None
+    kv_per_token_error_pct: float | None
     kv_cache_spec_type: str
     quantization: str | None
     tensor_parallel_size: int
@@ -66,6 +67,10 @@ class ValidationReport:
     params_mean_abs_error_pct: float
     params_median_abs_error_pct: float
     params_max_abs_error_pct: float
+    kv_compared_count: int
+    kv_mean_abs_error_pct: float
+    kv_median_abs_error_pct: float
+    kv_max_abs_error_pct: float
     worst_offenders: list[ComparisonResult]
     per_model_stats: dict[str, dict]
 
@@ -83,6 +88,10 @@ class ValidationReport:
                 "params_mean_abs_error_pct": round(self.params_mean_abs_error_pct, 2),
                 "params_median_abs_error_pct": round(self.params_median_abs_error_pct, 2),
                 "params_max_abs_error_pct": round(self.params_max_abs_error_pct, 2),
+                "kv_compared_count": self.kv_compared_count,
+                "kv_mean_abs_error_pct": round(self.kv_mean_abs_error_pct, 2),
+                "kv_median_abs_error_pct": round(self.kv_median_abs_error_pct, 2),
+                "kv_max_abs_error_pct": round(self.kv_max_abs_error_pct, 2),
             },
             "per_model": self.per_model_stats,
             "comparisons": [asdict(c) for c in self.comparisons],
@@ -93,7 +102,8 @@ class ValidationReport:
     def render_summary(self) -> str:
         hdr = (
             f"{'Model':<50s} {'Records':>7s} {'In-bounds':>10s}"
-            f" {'Mean err%':>10s} {'Max err%':>9s}"
+            f" {'Wt err%':>8s} {'Wt max%':>8s}"
+            f" {'KV err%':>8s} {'KV max%':>8s}"
         )
         sep = "─" * len(hdr)
         lines = [sep, hdr, sep]
@@ -102,16 +112,20 @@ class ValidationReport:
             s = self.per_model_stats[model]
             name = model if len(model) <= 48 else model[:46] + ".."
             in_b = f"{s['in_bounds']}/{s['records']}"
+            kv_mean = f"{s['kv_mean_error_pct']:+7.1f}%" if s.get("kv_mean_error_pct") is not None else "     n/a"
+            kv_max = f"{s['kv_max_abs_error_pct']:+7.1f}%" if s.get("kv_max_abs_error_pct") is not None else "     n/a"
             lines.append(
                 f"{name:<50s} {s['records']:>7d} {in_b:>10s}"
-                f" {s['mean_error_pct']:>+9.1f}% {s['max_abs_error_pct']:>+8.1f}%"
+                f" {s['mean_error_pct']:>+7.1f}% {s['max_abs_error_pct']:>+7.1f}%"
+                f" {kv_mean} {kv_max}"
             )
 
         lines.append(sep)
         in_b = f"{self.params_in_bounds_count}/{self.total_compared}"
         lines.append(
             f"{'TOTAL':<50s} {self.total_compared:>7d} {in_b:>10s}"
-            f" {self.params_mean_abs_error_pct:>9.1f}% {self.params_max_abs_error_pct:>8.1f}%"
+            f" {self.params_mean_abs_error_pct:>7.1f}% {self.params_max_abs_error_pct:>7.1f}%"
+            f" {self.kv_mean_abs_error_pct:>7.1f}% {self.kv_max_abs_error_pct:>7.1f}%"
         )
         lines.append(sep)
 
@@ -186,8 +200,10 @@ def _compare_record(
     if estimate.kv_cache.nominal_gib > 0 and total_tokens > 0:
         est_kv_pt = estimate.kv_cache.nominal_gib * _GIB / total_tokens
 
+    kv_error_pct: float | None = None
     if actual_kv_pt and est_kv_pt and est_kv_pt > 0:
         kv_ratio = actual_kv_pt / est_kv_pt
+        kv_error_pct = (actual_kv_pt - est_kv_pt) / est_kv_pt * 100
 
     return ComparisonResult(
         uuid=uuid,
@@ -202,6 +218,7 @@ def _compare_record(
         actual_kv_per_token_bytes=actual_kv_pt,
         estimated_kv_per_token_bytes=est_kv_pt,
         kv_per_token_ratio=kv_ratio,
+        kv_per_token_error_pct=kv_error_pct,
         kv_cache_spec_type=estimate.kv_cache_spec_type,
         quantization=ei.get("quantization"),
         tensor_parallel_size=ei.get("tensor_parallel_size", 1),
@@ -226,6 +243,8 @@ def _compute_per_model_stats(
         abs_errs = [abs(c.params_error_pct) for c in comps]
         signed_errs = [c.params_error_pct for c in comps]
         in_bounds = sum(1 for c in comps if c.params_within_bounds)
+        kv_errs = [c.kv_per_token_error_pct for c in comps if c.kv_per_token_error_pct is not None]
+        kv_abs_errs = [abs(e) for e in kv_errs]
         result[model] = {
             "records": len(comps),
             "in_bounds": in_bounds,
@@ -234,6 +253,9 @@ def _compute_per_model_stats(
             "mean_abs_error_pct": round(statistics.mean(abs_errs), 2),
             "median_abs_error_pct": round(statistics.median(abs_errs), 2),
             "max_abs_error_pct": round(max(abs_errs), 2),
+            "kv_compared": len(kv_errs),
+            "kv_mean_error_pct": round(statistics.mean(kv_errs), 2) if kv_errs else None,
+            "kv_max_abs_error_pct": round(max(kv_abs_errs), 2) if kv_abs_errs else None,
         }
     return result
 
@@ -246,6 +268,10 @@ def compute_aggregate_stats(
     abs_errs = [abs(c.params_error_pct) for c in comparisons]
     in_bounds = sum(1 for c in comparisons if c.params_within_bounds)
     n = len(comparisons)
+
+    kv_errs = [c.kv_per_token_error_pct for c in comparisons
+               if c.kv_per_token_error_pct is not None]
+    kv_abs_errs = [abs(e) for e in kv_errs]
 
     worst = sorted(comparisons, key=lambda c: abs(c.params_error_pct), reverse=True)[:10]
     per_model = _compute_per_model_stats(comparisons)
@@ -261,6 +287,10 @@ def compute_aggregate_stats(
         params_mean_abs_error_pct=round(statistics.mean(abs_errs), 2) if abs_errs else 0,
         params_median_abs_error_pct=round(statistics.median(abs_errs), 2) if abs_errs else 0,
         params_max_abs_error_pct=round(max(abs_errs), 2) if abs_errs else 0,
+        kv_compared_count=len(kv_errs),
+        kv_mean_abs_error_pct=round(statistics.mean(kv_abs_errs), 2) if kv_abs_errs else 0,
+        kv_median_abs_error_pct=round(statistics.median(kv_abs_errs), 2) if kv_abs_errs else 0,
+        kv_max_abs_error_pct=round(max(kv_abs_errs), 2) if kv_abs_errs else 0,
         worst_offenders=worst,
         per_model_stats=per_model,
     )
@@ -356,6 +386,8 @@ def _render_html_report(report: ValidationReport) -> str:
         in_b = s["in_bounds"]
         total = s["records"]
         cls = "pass" if in_b == total else "fail"
+        kv_mean = f"{s['kv_mean_error_pct']:+.2f}%" if s.get("kv_mean_error_pct") is not None else "-"
+        kv_max = f"{s['kv_max_abs_error_pct']:+.2f}%" if s.get("kv_max_abs_error_pct") is not None else "-"
         rows_per_model.append(
             f'<tr class="{cls}">'
             f"<td>{h(model)}</td>"
@@ -363,6 +395,8 @@ def _render_html_report(report: ValidationReport) -> str:
             f"<td>{in_b}/{total}</td>"
             f"<td>{s['mean_error_pct']:+.2f}%</td>"
             f"<td>{s['max_abs_error_pct']:+.2f}%</td>"
+            f"<td>{kv_mean}</td>"
+            f"<td>{kv_max}</td>"
             f"</tr>"
         )
 
@@ -387,7 +421,9 @@ def _render_html_report(report: ValidationReport) -> str:
     rows_all = []
     for c in sorted(report.comparisons, key=lambda x: (x.model_id, x.uuid)):
         cls = "pass" if c.params_within_bounds else "fail"
-        kv_ratio_str = f"{c.kv_per_token_ratio:.3f}" if c.kv_per_token_ratio else "-"
+        act_kv = f"{c.actual_kv_per_token_bytes:.1f}" if c.actual_kv_per_token_bytes else "-"
+        est_kv = f"{c.estimated_kv_per_token_bytes:.1f}" if c.estimated_kv_per_token_bytes else "-"
+        kv_err = f"{c.kv_per_token_error_pct:+.2f}%" if c.kv_per_token_error_pct is not None else "-"
         rows_all.append(
             f'<tr class="{cls}">'
             f"<td>{h(c.uuid[:8])}</td>"
@@ -401,7 +437,9 @@ def _render_html_report(report: ValidationReport) -> str:
             f"<td>[{c.estimated_params_lower_gib:.2f}, {c.estimated_params_upper_gib:.2f}]</td>"
             f"<td>{c.params_error_pct:+.2f}%</td>"
             f"<td>{'PASS' if c.params_within_bounds else 'FAIL'}</td>"
-            f"<td>{kv_ratio_str}</td>"
+            f"<td>{act_kv}</td>"
+            f"<td>{est_kv}</td>"
+            f"<td>{kv_err}</td>"
             f"</tr>"
         )
 
@@ -440,7 +478,43 @@ def _render_html_report(report: ValidationReport) -> str:
   tr.fail td:last-child {{ color: #c62828; font-weight: 600; }}
   tr.fail {{ background: #fff3f3; }}
   .timestamp {{ color: #999; font-size: 0.8rem; }}
+  th.sortable {{ cursor: pointer; user-select: none; }}
+  th.sortable:hover {{ background: #1e2f50; }}
+  th.sortable::after {{ content: "\\2195"; margin-left: 0.3em; opacity: 0.4; }}
+  th.sort-asc::after {{ content: "\\2191"; opacity: 1; }}
+  th.sort-desc::after {{ content: "\\2193"; opacity: 1; }}
 </style>
+<script>
+document.addEventListener("DOMContentLoaded", function() {{
+  document.querySelectorAll("table.sortable").forEach(function(table) {{
+    var headers = table.querySelectorAll("th");
+    headers.forEach(function(th, colIdx) {{
+      th.classList.add("sortable");
+      th.addEventListener("click", function() {{
+        var tbody = table.querySelector("tbody");
+        var rows = Array.from(tbody.querySelectorAll("tr"));
+        var dir = th.classList.contains("sort-asc") ? "desc" : "asc";
+        headers.forEach(function(h) {{ h.classList.remove("sort-asc", "sort-desc"); }});
+        th.classList.add("sort-" + dir);
+        rows.sort(function(a, b) {{
+          var aText = a.children[colIdx].textContent.trim();
+          var bText = b.children[colIdx].textContent.trim();
+          var aNum = parseFloat(aText.replace(/[%+\\[\\],]/g, ""));
+          var bNum = parseFloat(bText.replace(/[%+\\[\\],]/g, ""));
+          var result;
+          if (!isNaN(aNum) && !isNaN(bNum)) {{
+            result = aNum - bNum;
+          }} else {{
+            result = aText.localeCompare(bText);
+          }}
+          return dir === "desc" ? -result : result;
+        }});
+        rows.forEach(function(row) {{ tbody.appendChild(row); }});
+      }});
+    }});
+  }});
+}});
+</script>
 </head>
 <body>
 <h1>vLLM Memory Estimator &mdash; Validation Report</h1>
@@ -452,55 +526,107 @@ def _render_html_report(report: ValidationReport) -> str:
     <div class="label">Records compared</div>
   </div>
   <div class="card">
-    <div class="value">{report.params_in_bounds_pct:.1f}%</div>
-    <div class="label">Params in bounds</div>
-  </div>
-  <div class="card">
-    <div class="value">{report.params_mean_abs_error_pct:.1f}%</div>
-    <div class="label">Mean |error|</div>
-  </div>
-  <div class="card">
-    <div class="value">{report.params_median_abs_error_pct:.1f}%</div>
-    <div class="label">Median |error|</div>
-  </div>
-  <div class="card">
-    <div class="value">{report.params_max_abs_error_pct:.1f}%</div>
-    <div class="label">Max |error|</div>
-  </div>
-  <div class="card">
     <div class="value">{report.total_skipped}</div>
     <div class="label">Skipped</div>
   </div>
 </div>
 
+<h2>Weight loading</h2>
+<p style="margin:0.5rem 0 0.75rem; font-size:0.9rem; color:#555;">
+  Compares <code>model_load_gib</code> from vLLM startup logs (actual weight load)
+  against the estimator's predicted weight size.
+</p>
+<div class="summary">
+  <div class="card">
+    <div class="value">{report.params_in_bounds_pct:.1f}%</div>
+    <div class="label">Weights in bounds</div>
+  </div>
+  <div class="card">
+    <div class="value">{report.params_mean_abs_error_pct:.1f}%</div>
+    <div class="label">Wt mean |error|</div>
+  </div>
+  <div class="card">
+    <div class="value">{report.params_median_abs_error_pct:.1f}%</div>
+    <div class="label">Wt median |error|</div>
+  </div>
+  <div class="card">
+    <div class="value">{report.params_max_abs_error_pct:.1f}%</div>
+    <div class="label">Wt max |error|</div>
+  </div>
+</div>
+
+<h2>KV cache (per-token bytes)</h2>
+<p style="margin:0.5rem 0 0.75rem; font-size:0.9rem; color:#555;">
+  Compares per-token KV cache bytes: actual
+  (<code>available_kv_cache_gib&nbsp;/&nbsp;kv_cache_tokens</code> from logs)
+  vs estimator prediction.
+</p>
+<div class="summary">
+  <div class="card">
+    <div class="value">{report.kv_compared_count}</div>
+    <div class="label">KV records compared</div>
+  </div>
+  <div class="card">
+    <div class="value">{report.kv_mean_abs_error_pct:.1f}%</div>
+    <div class="label">KV mean |error|</div>
+  </div>
+  <div class="card">
+    <div class="value">{report.kv_median_abs_error_pct:.1f}%</div>
+    <div class="label">KV median |error|</div>
+  </div>
+  <div class="card">
+    <div class="value">{report.kv_max_abs_error_pct:.1f}%</div>
+    <div class="label">KV max |error|</div>
+  </div>
+</div>
+
 <h2>Per-model summary</h2>
-<table>
-<tr><th>Model</th><th>Records</th><th>In bounds</th><th>Mean err%</th><th>Max |err%|</th></tr>
+<table class="sortable">
+<thead>
+<tr><th>Model</th><th>Records</th><th>Wt in bounds</th>
+    <th>Wt mean err%</th><th>Wt max |err%|</th>
+    <th>KV mean err%</th><th>KV max |err%|</th></tr>
+</thead>
+<tbody>
 {"".join(rows_per_model)}
+</tbody>
+<tfoot>
 <tr style="font-weight:700; border-top:2px solid #333">
   <td>TOTAL</td><td>{report.total_compared}</td>
   <td>{report.params_in_bounds_count}/{report.total_compared}</td>
   <td>{report.params_mean_abs_error_pct:.2f}%</td>
   <td>{report.params_max_abs_error_pct:.2f}%</td>
+  <td>{report.kv_mean_abs_error_pct:.2f}%</td>
+  <td>{report.kv_max_abs_error_pct:.2f}%</td>
 </tr>
+</tfoot>
 </table>
 
 <h2>Worst offenders (top 10 by |error|)</h2>
-<table>
+<table class="sortable">
+<thead>
 <tr><th>UUID</th><th>Model</th><th>Accel</th><th>TP</th><th>Seq len</th>
-    <th>Quant</th><th>Actual GiB</th><th>Est GiB</th><th>Error</th><th>Bounds</th></tr>
+    <th>Quant</th><th>Actual Weights GiB</th><th>Est Weights GiB</th><th>Error</th><th>Bounds</th></tr>
+</thead>
+<tbody>
 {"".join(rows_worst)}
+</tbody>
 </table>
 
-{"<h2>Skipped records</h2><table><tr><th>UUID</th><th>Model</th><th>Reason</th></tr>"
- + "".join(skipped_rows) + "</table>" if skipped_rows else ""}
+{'<h2>Skipped records</h2><table class="sortable"><thead><tr><th>UUID</th><th>Model</th><th>Reason</th></tr></thead><tbody>'
+ + "".join(skipped_rows) + "</tbody></table>" if skipped_rows else ""}
 
 <h2>All comparisons</h2>
-<table>
+<table class="sortable">
+<thead>
 <tr><th>UUID</th><th>Model</th><th>Accel</th><th>TP</th><th>Seq len</th>
-    <th>Quant</th><th>Actual GiB</th><th>Est GiB</th><th>Bounds</th>
-    <th>Error</th><th>Status</th><th>KV ratio</th></tr>
+    <th>Quant</th><th>Actual Wt GiB</th><th>Est Wt GiB</th><th>Wt bounds</th>
+    <th>Wt err%</th><th>Status</th>
+    <th>Actual KV B/tok</th><th>Est KV B/tok</th><th>KV err%</th></tr>
+</thead>
+<tbody>
 {"".join(rows_all)}
+</tbody>
 </table>
 
 </body>

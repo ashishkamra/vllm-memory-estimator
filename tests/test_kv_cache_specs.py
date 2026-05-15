@@ -565,7 +565,7 @@ def test_build_memory_buckets_hybrid():
 
 
 def test_mamba_tp_no_double_division():
-    """TP division should only happen once in build_memory_buckets, not in state functions."""
+    """Mamba state is per-GPU (not sharded across TP), so KV should be the same at any TP."""
     from memory_estimator.buckets import build_memory_buckets
 
     cfg = PureMamba1Config()
@@ -581,8 +581,7 @@ def test_mamba_tp_no_double_division():
         max_seq_len=4096, quant_spec=quant_spec,
         tensor_parallel_size=2,
     )
-    # With TP=2, KV cache per GPU should be exactly half of TP=1
-    assert abs(tp2.kv_cache_bytes - tp1.kv_cache_bytes / 2) < 1
+    assert abs(tp2.kv_cache_bytes - tp1.kv_cache_bytes) < 1
 
 
 def test_orchestrator_fp8_mla():

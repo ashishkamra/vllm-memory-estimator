@@ -60,6 +60,7 @@ class KVCacheResult:
     total_bytes: float
     spec_type: str
     layer_groups: list[LayerGroupEstimate] = field(default_factory=list)
+    per_gpu: bool = False
 
 
 @dataclass
@@ -384,8 +385,10 @@ def estimate_kv_cache_bytes_specaware(
 ) -> KVCacheResult:
     """Dispatch to the right vLLM KV cache spec based on model config.
 
-    Returns **unsharded** totals; TP/PP division is applied uniformly
-    by ``build_memory_buckets``.
+    Most specs return **unsharded** totals (``per_gpu=False``); TP/PP division
+    is applied by ``build_memory_buckets``.  MLA and Mamba specs already compute
+    per-GPU values (``per_gpu=True``) because their state is not sharded across
+    TP — each GPU holds the full latent/SSM state.
     """
     bs = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
     batched = (max_num_batched_tokens
@@ -410,7 +413,7 @@ def estimate_kv_cache_bytes_specaware(
         total = _mamba_bytes(
             config, layers_, max_active_seqs, max_seq_len, quant_spec, bs,
         )
-        return KVCacheResult(total_bytes=total, spec_type="mamba")
+        return KVCacheResult(total_bytes=total, spec_type="mamba", per_gpu=True)
 
     if spec_type == "mla":
         lora_rank = _cfg_kv_lora_rank(config)
@@ -420,7 +423,7 @@ def estimate_kv_cache_bytes_specaware(
             layers_, max_active_seqs, lora_rank, rope_dim, quant_spec,
             stub, bs, fp8_ds_mla=use_fp8,
         )
-        return KVCacheResult(total_bytes=total, spec_type="mla")
+        return KVCacheResult(total_bytes=total, spec_type="mla", per_gpu=True)
 
     if spec_type == "sliding_window":
         window = _cfg_sliding_window(config)

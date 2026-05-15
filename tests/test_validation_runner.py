@@ -112,6 +112,9 @@ def test_compare_record_kv_sanity():
     assert comp.estimated_kv_per_token_bytes is not None
     assert comp.kv_per_token_ratio is not None
     assert comp.kv_per_token_ratio > 0
+    assert comp.kv_per_token_error_pct is not None
+    expected_err = (comp.actual_kv_per_token_bytes - comp.estimated_kv_per_token_bytes) / comp.estimated_kv_per_token_bytes * 100
+    assert comp.kv_per_token_error_pct == pytest.approx(expected_err)
 
 
 def test_compare_record_kv_none_when_missing():
@@ -121,6 +124,7 @@ def test_compare_record_kv_none_when_missing():
 
     assert comp.actual_kv_per_token_bytes is None
     assert comp.kv_per_token_ratio is None
+    assert comp.kv_per_token_error_pct is None
 
 
 def test_compare_record_metadata():
@@ -152,7 +156,8 @@ def _make_comparison(
         estimated_params_lower_gib=9.5, estimated_params_upper_gib=10.5,
         params_within_bounds=within_bounds, params_error_pct=error_pct,
         actual_kv_per_token_bytes=None, estimated_kv_per_token_bytes=None,
-        kv_per_token_ratio=None, kv_cache_spec_type="full",
+        kv_per_token_ratio=None, kv_per_token_error_pct=None,
+        kv_cache_spec_type="full",
         quantization=None, tensor_parallel_size=1, max_seq_len=4096,
     )
 
@@ -173,6 +178,8 @@ def test_aggregate_stats_basic():
     assert report.params_mean_abs_error_pct == pytest.approx(3.5)
     assert report.params_median_abs_error_pct == pytest.approx(2.5)
     assert report.params_max_abs_error_pct == pytest.approx(8.0)
+    assert report.kv_compared_count == 0
+    assert report.kv_mean_abs_error_pct == 0
     assert len(report.worst_offenders) == 4
     assert report.worst_offenders[0].uuid == "u3"
 
