@@ -120,6 +120,8 @@ def build_memory_buckets(
     non_expert_bytes: float = 0.0,
     replicated_bytes: float = 0.0,
     block_size: int | None = None,
+    model_config=None,
+    parallel_config=None,
 ) -> MemoryBuckets:
     tp = tensor_parallel_size
     pp = pipeline_parallel_size
@@ -148,6 +150,8 @@ def build_memory_buckets(
         config, effective_seqs, max_seq_len, quant_spec,
         block_size=effective_block_size,
         max_num_batched_tokens=effective_batched_tokens,
+        model_config=model_config,
+        parallel_config=parallel_config,
     )
     kv_cache = kv_result.total_bytes
     kv_spec_type = kv_result.spec_type

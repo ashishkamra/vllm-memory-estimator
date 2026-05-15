@@ -29,7 +29,9 @@ pip install -e ".[dev]"
 ### Dependencies
 
 - `huggingface_hub>=0.20.0` — model config and safetensors header fetching
-- `vllm>=0.8.0` — KV cache spec classes for accurate cache estimation
+- `vllm>=0.9.0` — `ModelConfig` for architecture detection (MLA, hybrid,
+  TP-aware KV head counts) and `KVCacheSpec` classes for cache estimation.
+  No GPU required — the estimator uses vLLM's config layer only.
 
 ## Usage
 

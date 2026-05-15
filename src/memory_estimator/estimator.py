@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass
 
 from .buckets import build_memory_buckets
-from .config_utils import max_model_len
 from .dtype_utils import normalise_dtype
 from .model_shapes import collect_parameter_shapes
 from .model_summary import ModelSummary
@@ -14,6 +14,8 @@ from .quantization import parse_quantization
 from .reports import MemoryEstimate
 from .reports import build_estimate
 from .validation import validate_positive_int
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,39 +38,45 @@ class EstimatorInputs:
     use_cache: bool = True
 
 
-_NESTED_CONFIG_KEYS = frozenset((
-    "text_config", "vision_config", "language_model_config", "llm_config",
-    "base_model_config", "model_config", "decoder", "encoder",
-))
+def _load_model_config(inputs: EstimatorInputs):
+    """Construct a vLLM ModelConfig from EstimatorInputs.
 
-
-class _DictConfig:
-    """Lightweight config wrapper when transformers is not installed.
-
-    Only wraps known nested config keys as ``_DictConfig`` objects so that
-    ``getattr()``-based attribute access works for architecture resolution.
-    Everything else (like ``quantization_config``) stays as a plain dict.
+    ModelConfig downloads config.json, resolves architecture attributes
+    (head_dim, kv_heads, MLA detection, hybrid detection, etc.), and
+    handles quantization config parsing — replacing our custom
+    _DictConfig wrapper and config_utils attribute resolvers.
     """
+    from vllm.config.model import ModelConfig
 
-    def __init__(self, data: dict):
-        for key, value in data.items():
-            if isinstance(value, dict) and key in _NESTED_CONFIG_KEYS:
-                setattr(self, key, _DictConfig(value))
-            else:
-                setattr(self, key, value)
+    vllm_log = logging.getLogger("vllm")
+    prev_level = vllm_log.level
+    vllm_log.setLevel(logging.ERROR)
+    try:
+        kwargs: dict = {
+            "model": inputs.model_id,
+            "trust_remote_code": True,
+        }
+        if inputs.revision:
+            kwargs["revision"] = inputs.revision
+        if inputs.quantization:
+            kwargs["quantization"] = inputs.quantization
+        if inputs.dtype and inputs.dtype != "auto":
+            kwargs["dtype"] = inputs.dtype
+        if inputs.max_seq_len is not None:
+            kwargs["max_model_len"] = inputs.max_seq_len
+        return ModelConfig(**kwargs)
+    finally:
+        vllm_log.setLevel(prev_level)
 
 
-def _load_config(inputs: EstimatorInputs):
-    import json
+def _build_parallel_config(inputs: EstimatorInputs):
+    from vllm.config.parallel import ParallelConfig
 
-    from huggingface_hub import hf_hub_download
-
-    path = hf_hub_download(
-        inputs.model_id, "config.json", revision=inputs.revision
+    return ParallelConfig(
+        tensor_parallel_size=inputs.tensor_parallel_size,
+        pipeline_parallel_size=inputs.pipeline_parallel_size,
+        data_parallel_size=inputs.data_parallel_size,
     )
-    with open(path) as f:
-        data = json.load(f)
-    return _DictConfig(data)
 
 
 def _validate_inputs(inputs: EstimatorInputs) -> None:
@@ -108,13 +116,12 @@ def _apply_dtype_overrides(inputs: EstimatorInputs, quant_spec):
 
 def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
     _validate_inputs(inputs)
-    config = _load_config(inputs)
+    mc = _load_model_config(inputs)
+    pc = _build_parallel_config(inputs)
 
-    seq_len = inputs.max_seq_len
-    if seq_len is None:
-        seq_len = max_model_len(config)
+    seq_len = inputs.max_seq_len if inputs.max_seq_len is not None else mc.max_model_len
 
-    quant_spec = parse_quantization(config, cli_quantization=inputs.quantization)
+    quant_spec = parse_quantization(mc.hf_config, cli_quantization=inputs.quantization)
     quant_spec = _apply_dtype_overrides(inputs, quant_spec)
     parameter_shapes, precomputed_bytes, expert_bytes, non_expert_bytes, \
         replicated_bytes, disk_bytes_per_element = (
@@ -137,7 +144,7 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
     # disk, scale parameter bytes to reflect runtime GPU memory rather than
     # on-disk size.
     if inputs.quantization:
-        base_spec = parse_quantization(config)
+        base_spec = parse_quantization(mc.hf_config)
         if quant_spec.weight_dtype.bits < base_spec.weight_dtype.bits:
             scale = quant_spec.weight_dtype.bits / base_spec.weight_dtype.bits
             precomputed_bytes = int(precomputed_bytes * scale)
@@ -147,7 +154,9 @@ def prepare_summary(inputs: EstimatorInputs) -> ModelSummary:
 
     return ModelSummary(
         model_id=inputs.model_id,
-        config=config,
+        model_config=mc,
+        parallel_config=pc,
+        config=mc.hf_config,
         quantization=quant_spec,
         parameter_shapes=parameter_shapes,
         max_active_seqs=inputs.max_active_seqs,
@@ -185,6 +194,8 @@ def estimate_memory(summary: ModelSummary) -> MemoryEstimate:
         non_expert_bytes=summary.non_expert_bytes,
         replicated_bytes=summary.replicated_bytes,
         block_size=summary.block_size,
+        model_config=summary.model_config,
+        parallel_config=summary.parallel_config,
     )
     return build_estimate(
         summary.model_id, buckets,

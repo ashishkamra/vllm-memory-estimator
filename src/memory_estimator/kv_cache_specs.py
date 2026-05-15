@@ -314,11 +314,20 @@ def _compute_hybrid_kv_bytes(
     quant_spec: QuantizationSpec,
     block_size: int,
     batched: int,
+    model_config=None,
+    parallel_config=None,
 ) -> KVCacheResult:
     """Compute KV cache for hybrid models with mixed layer types."""
-    hidden = hidden_size(config)
-    n_heads, kv_heads = num_attention_heads(config)
-    hdim = head_dim(config, hidden, n_heads)
+    if model_config is not None:
+        hdim = model_config.get_head_size()
+        if parallel_config is not None:
+            kv_heads = model_config.get_num_kv_heads(parallel_config)
+        else:
+            kv_heads = model_config.get_total_num_kv_heads()
+    else:
+        hidden = hidden_size(config)
+        n_heads, kv_heads = num_attention_heads(config)
+        hdim = head_dim(config, hidden, n_heads)
 
     block_types = _cfg_layers_block_type(config)
     nope_mask = _cfg_no_rope_layers(config)
@@ -372,7 +381,26 @@ def _compute_hybrid_kv_bytes(
         total += b
         groups.append(LayerGroupEstimate("mamba", mamba_layers, b))
 
-    return KVCacheResult(total_bytes=total, spec_type="hybrid", layer_groups=groups)
+    tp_applied = model_config is not None and parallel_config is not None
+    return KVCacheResult(total_bytes=total, spec_type="hybrid", layer_groups=groups,
+                         per_gpu=tp_applied)
+
+
+def _detect_spec_type_from_model_config(model_config) -> str:
+    """Use vLLM's ModelConfig for accurate spec type detection."""
+    if model_config.is_hybrid:
+        return "hybrid"
+    if getattr(model_config, "is_deepseek_mla", False):
+        return "mla"
+    if getattr(getattr(model_config, "_model_info", None), "has_inner_state", False):
+        return "mamba"
+    sw = model_config.get_sliding_window()
+    if sw is not None:
+        return "sliding_window"
+    chunk = _cfg_attention_chunk_size(model_config.hf_text_config)
+    if chunk is not None:
+        return "chunked_local"
+    return "full"
 
 
 def estimate_kv_cache_bytes_specaware(
@@ -382,30 +410,49 @@ def estimate_kv_cache_bytes_specaware(
     quant_spec: QuantizationSpec,
     block_size: int | None = None,
     max_num_batched_tokens: int | None = None,
+    model_config=None,
+    parallel_config=None,
 ) -> KVCacheResult:
     """Dispatch to the right vLLM KV cache spec based on model config.
 
-    Most specs return **unsharded** totals (``per_gpu=False``); TP/PP division
-    is applied by ``build_memory_buckets``.  MLA and Mamba specs already compute
-    per-GPU values (``per_gpu=True``) because their state is not sharded across
-    TP — each GPU holds the full latent/SSM state.
+    When *model_config* (``vllm.config.ModelConfig``) is provided, uses its
+    detection logic for accurate hybrid/MLA/Mamba classification and TP-aware
+    KV head counts.  Falls back to config-attribute heuristics otherwise.
+
+    MLA and Mamba specs return ``per_gpu=True`` because their state is not
+    sharded across TP.
     """
     bs = block_size if block_size is not None else DEFAULT_BLOCK_SIZE
     batched = (max_num_batched_tokens
                if max_num_batched_tokens is not None
                else max(DEFAULT_MAX_NUM_BATCHED_TOKENS, max_active_seqs))
 
-    spec_type = detect_kv_spec_type(config)
+    if model_config is not None:
+        spec_type = _detect_spec_type_from_model_config(model_config)
+    else:
+        spec_type = detect_kv_spec_type(config)
 
     if spec_type == "hybrid":
         return _compute_hybrid_kv_bytes(
             config, max_active_seqs, max_seq_len, quant_spec, bs, batched,
+            model_config=model_config, parallel_config=parallel_config,
         )
 
-    hidden = hidden_size(config)
-    layers_ = num_layers(config)
-    n_heads, kv_heads = num_attention_heads(config)
-    hdim = head_dim(config, hidden, n_heads)
+    # When model_config + parallel_config are available, kv_heads is already
+    # TP-aware (max(1, total // tp)), so all results are per_gpu=True.
+    tp_applied = model_config is not None and parallel_config is not None
+    if model_config is not None:
+        layers_ = model_config.model_arch_config.total_num_hidden_layers
+        hdim = model_config.get_head_size()
+        if parallel_config is not None:
+            kv_heads = model_config.get_num_kv_heads(parallel_config)
+        else:
+            kv_heads = model_config.get_total_num_kv_heads()
+    else:
+        hidden = hidden_size(config)
+        layers_ = num_layers(config)
+        n_heads, kv_heads = num_attention_heads(config)
+        hdim = head_dim(config, hidden, n_heads)
 
     stub = _config_stub(max_seq_len, batched)
 
@@ -418,6 +465,8 @@ def estimate_kv_cache_bytes_specaware(
     if spec_type == "mla":
         lora_rank = _cfg_kv_lora_rank(config)
         rope_dim = _cfg_qk_rope_head_dim(config)
+        if model_config is not None and lora_rank == 0:
+            lora_rank = hdim - (rope_dim or 0)
         use_fp8 = quant_spec.kv_cache_dtype.bits == 8
         total = _mla_bytes(
             layers_, max_active_seqs, lora_rank, rope_dim, quant_spec,
@@ -427,11 +476,13 @@ def estimate_kv_cache_bytes_specaware(
 
     if spec_type == "sliding_window":
         window = _cfg_sliding_window(config)
+        if window is None and model_config is not None:
+            window = model_config.get_sliding_window()
         assert window is not None
         total = _sliding_window_bytes(
             layers_, max_active_seqs, kv_heads, hdim, quant_spec, stub, bs, window,
         )
-        return KVCacheResult(total_bytes=total, spec_type="sliding_window")
+        return KVCacheResult(total_bytes=total, spec_type="sliding_window", per_gpu=tp_applied)
 
     if spec_type == "chunked_local":
         chunk = _cfg_attention_chunk_size(config)
@@ -439,10 +490,10 @@ def estimate_kv_cache_bytes_specaware(
         total = _chunked_local_bytes(
             layers_, max_active_seqs, kv_heads, hdim, quant_spec, stub, bs, chunk,
         )
-        return KVCacheResult(total_bytes=total, spec_type="chunked_local")
+        return KVCacheResult(total_bytes=total, spec_type="chunked_local", per_gpu=tp_applied)
 
     # Default: full attention
     total = _full_attention_bytes(
         layers_, max_active_seqs, kv_heads, hdim, quant_spec, stub, bs,
     )
-    return KVCacheResult(total_bytes=total, spec_type="full")
+    return KVCacheResult(total_bytes=total, spec_type="full", per_gpu=tp_applied)

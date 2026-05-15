@@ -20,6 +20,8 @@ class ModelSummary:
     parameter_shapes: Sequence[ParameterShape]
     max_active_seqs: int
     max_seq_len: int
+    model_config: Any = None
+    parallel_config: Any = None
     enforce_eager: bool = False
     cudagraph_capture_sizes: list[int] | None = None
     max_num_batched_tokens: int | None = None
