@@ -189,16 +189,24 @@ def _compare_record(
     est_kv_pt: float | None = None
     kv_ratio: float | None = None
 
-    avail_kv = log_mem.get("available_kv_cache_gib")
-    kv_tokens = log_mem.get("kv_cache_tokens")
-    if avail_kv and kv_tokens and kv_tokens > 0:
-        actual_kv_pt = avail_kv * _GIB / kv_tokens
-
-    max_active = 256
     max_sl = ei["max_seq_len"]
-    total_tokens = max_active * max_sl
-    if estimate.kv_cache.nominal_gib > 0 and total_tokens > 0:
-        est_kv_pt = estimate.kv_cache.nominal_gib * _GIB / total_tokens
+
+    # Per-token KV comparison is only meaningful for specs where cache scales
+    # linearly with sequence length (full, mla).  For sliding window, chunked
+    # local, or mamba the cache size is decoupled from max_seq_len, so the
+    # per-token metric would be misleading.
+    kv_comparable = estimate.kv_cache_spec_type in ("full", "mla")
+
+    if kv_comparable:
+        avail_kv = log_mem.get("available_kv_cache_gib")
+        kv_tokens = log_mem.get("kv_cache_tokens")
+        if avail_kv and kv_tokens and kv_tokens > 0:
+            actual_kv_pt = avail_kv * _GIB / kv_tokens
+
+        max_active = ei.get("max_active_seqs") or 256
+        total_tokens = max_active * max_sl
+        if estimate.kv_cache.nominal_gib > 0 and total_tokens > 0:
+            est_kv_pt = estimate.kv_cache.nominal_gib * _GIB / total_tokens
 
     kv_error_pct: float | None = None
     if actual_kv_pt and est_kv_pt and est_kv_pt > 0:
