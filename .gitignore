@@ -8,6 +8,7 @@ build/
 .venv/
 test_data/logs/
 test_data/validation_db.json
+test_data/consolidated_dashboard.csv
 test_data/validation_report.json
 test_data/validation_report.html
 node_modules/
