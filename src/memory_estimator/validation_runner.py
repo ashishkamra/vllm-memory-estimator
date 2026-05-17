@@ -27,6 +27,23 @@ _GIB = 1024**3
 
 
 # ---------------------------------------------------------------------------
+# GPU memory lookup (GiB per device)
+# ---------------------------------------------------------------------------
+
+_GPU_MEMORY_GIB: dict[str, float] = {
+    "H200": 141.0,
+    "H100": 80.0,
+    "H100-80": 80.0,
+    "B200": 192.0,
+    "MI300X": 192.0,
+    "A100-80": 80.0,
+    "A100-40": 40.0,
+    "A100": 80.0,
+    "L40S": 48.0,
+}
+
+
+# ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
 
@@ -47,6 +64,9 @@ class ComparisonResult:
     estimated_kv_per_token_bytes: float | None
     kv_per_token_ratio: float | None
     kv_per_token_error_pct: float | None
+    actual_overhead_gib: float | None
+    estimated_overhead_gib: float | None
+    overhead_error_pct: float | None
     kv_cache_spec_type: str
     quantization: str | None
     tensor_parallel_size: int
@@ -71,6 +91,10 @@ class ValidationReport:
     kv_mean_abs_error_pct: float
     kv_median_abs_error_pct: float
     kv_max_abs_error_pct: float
+    overhead_compared_count: int
+    overhead_mean_abs_error_pct: float
+    overhead_median_abs_error_pct: float
+    overhead_max_abs_error_pct: float
     worst_offenders: list[ComparisonResult]
     per_model_stats: dict[str, dict]
 
@@ -92,6 +116,10 @@ class ValidationReport:
                 "kv_mean_abs_error_pct": round(self.kv_mean_abs_error_pct, 2),
                 "kv_median_abs_error_pct": round(self.kv_median_abs_error_pct, 2),
                 "kv_max_abs_error_pct": round(self.kv_max_abs_error_pct, 2),
+                "overhead_compared_count": self.overhead_compared_count,
+                "overhead_mean_abs_error_pct": round(self.overhead_mean_abs_error_pct, 2),
+                "overhead_median_abs_error_pct": round(self.overhead_median_abs_error_pct, 2),
+                "overhead_max_abs_error_pct": round(self.overhead_max_abs_error_pct, 2),
             },
             "per_model": self.per_model_stats,
             "comparisons": [asdict(c) for c in self.comparisons],
@@ -104,6 +132,7 @@ class ValidationReport:
             f"{'Model':<50s} {'Records':>7s} {'In-bounds':>10s}"
             f" {'Wt err%':>8s} {'Wt max%':>8s}"
             f" {'KV err%':>8s} {'KV max%':>8s}"
+            f" {'OH err%':>8s} {'OH max%':>8s}"
         )
         sep = "─" * len(hdr)
         lines = [sep, hdr, sep]
@@ -114,10 +143,13 @@ class ValidationReport:
             in_b = f"{s['in_bounds']}/{s['records']}"
             kv_mean = f"{s['kv_mean_error_pct']:+7.1f}%" if s.get("kv_mean_error_pct") is not None else "     n/a"
             kv_max = f"{s['kv_max_abs_error_pct']:+7.1f}%" if s.get("kv_max_abs_error_pct") is not None else "     n/a"
+            oh_mean = f"{s['oh_mean_error_pct']:+7.1f}%" if s.get("oh_mean_error_pct") is not None else "     n/a"
+            oh_max = f"{s['oh_max_abs_error_pct']:+7.1f}%" if s.get("oh_max_abs_error_pct") is not None else "     n/a"
             lines.append(
                 f"{name:<50s} {s['records']:>7d} {in_b:>10s}"
                 f" {s['mean_error_pct']:>+7.1f}% {s['max_abs_error_pct']:>+7.1f}%"
                 f" {kv_mean} {kv_max}"
+                f" {oh_mean} {oh_max}"
             )
 
         lines.append(sep)
@@ -126,6 +158,8 @@ class ValidationReport:
             f"{'TOTAL':<50s} {self.total_compared:>7d} {in_b:>10s}"
             f" {self.params_mean_abs_error_pct:>7.1f}% {self.params_max_abs_error_pct:>7.1f}%"
             f" {self.kv_mean_abs_error_pct:>7.1f}% {self.kv_max_abs_error_pct:>7.1f}%"
+            f" {self.overhead_mean_abs_error_pct:>7.1f}%"
+            f" {self.overhead_max_abs_error_pct:>7.1f}%"
         )
         lines.append(sep)
 
@@ -213,10 +247,29 @@ def _compare_record(
         kv_ratio = actual_kv_pt / est_kv_pt
         kv_error_pct = (actual_kv_pt - est_kv_pt) / est_kv_pt * 100
 
+    # --- Non-weight overhead comparison ---
+    # actual_overhead = usable_gpu_memory - weights - kv_cache_allocation
+    # estimated_overhead = activations + workspace + vllm_overhead
+    accelerator = record["csv_metadata"]["accelerator"]
+    actual_oh: float | None = None
+    est_oh: float | None = None
+    oh_error: float | None = None
+
+    gpu_mem = _GPU_MEMORY_GIB.get(accelerator)
+    avail_kv_gib = log_mem.get("available_kv_cache_gib")
+    gpu_util = log_mem.get("gpu_memory_utilization", 0.9)
+    if gpu_mem and avail_kv_gib is not None:
+        usable = gpu_mem * gpu_util
+        actual_oh = usable - actual - avail_kv_gib
+        est_oh = (estimate.activations.nominal_gib + estimate.workspace.nominal_gib
+                  + estimate.vllm_overhead.nominal_gib)
+        if est_oh > 0:
+            oh_error = (actual_oh - est_oh) / est_oh * 100
+
     return ComparisonResult(
         uuid=uuid,
         model_id=ei["model_id"],
-        accelerator=record["csv_metadata"]["accelerator"],
+        accelerator=accelerator,
         actual_model_load_gib=actual,
         estimated_params_nominal_gib=nominal,
         estimated_params_lower_gib=estimate.parameters.lower_gib,
@@ -227,6 +280,9 @@ def _compare_record(
         estimated_kv_per_token_bytes=est_kv_pt,
         kv_per_token_ratio=kv_ratio,
         kv_per_token_error_pct=kv_error_pct,
+        actual_overhead_gib=actual_oh,
+        estimated_overhead_gib=est_oh,
+        overhead_error_pct=oh_error,
         kv_cache_spec_type=estimate.kv_cache_spec_type,
         quantization=ei.get("quantization"),
         tensor_parallel_size=ei.get("tensor_parallel_size", 1),
@@ -253,6 +309,8 @@ def _compute_per_model_stats(
         in_bounds = sum(1 for c in comps if c.params_within_bounds)
         kv_errs = [c.kv_per_token_error_pct for c in comps if c.kv_per_token_error_pct is not None]
         kv_abs_errs = [abs(e) for e in kv_errs]
+        oh_errs = [c.overhead_error_pct for c in comps if c.overhead_error_pct is not None]
+        oh_abs_errs = [abs(e) for e in oh_errs]
         result[model] = {
             "records": len(comps),
             "in_bounds": in_bounds,
@@ -264,6 +322,9 @@ def _compute_per_model_stats(
             "kv_compared": len(kv_errs),
             "kv_mean_error_pct": round(statistics.mean(kv_errs), 2) if kv_errs else None,
             "kv_max_abs_error_pct": round(max(kv_abs_errs), 2) if kv_abs_errs else None,
+            "oh_compared": len(oh_errs),
+            "oh_mean_error_pct": round(statistics.mean(oh_errs), 2) if oh_errs else None,
+            "oh_max_abs_error_pct": round(max(oh_abs_errs), 2) if oh_abs_errs else None,
         }
     return result
 
@@ -280,6 +341,10 @@ def compute_aggregate_stats(
     kv_errs = [c.kv_per_token_error_pct for c in comparisons
                if c.kv_per_token_error_pct is not None]
     kv_abs_errs = [abs(e) for e in kv_errs]
+
+    oh_errs = [c.overhead_error_pct for c in comparisons
+               if c.overhead_error_pct is not None]
+    oh_abs_errs = [abs(e) for e in oh_errs]
 
     worst = sorted(comparisons, key=lambda c: abs(c.params_error_pct), reverse=True)[:10]
     per_model = _compute_per_model_stats(comparisons)
@@ -299,6 +364,10 @@ def compute_aggregate_stats(
         kv_mean_abs_error_pct=round(statistics.mean(kv_abs_errs), 2) if kv_abs_errs else 0,
         kv_median_abs_error_pct=round(statistics.median(kv_abs_errs), 2) if kv_abs_errs else 0,
         kv_max_abs_error_pct=round(max(kv_abs_errs), 2) if kv_abs_errs else 0,
+        overhead_compared_count=len(oh_errs),
+        overhead_mean_abs_error_pct=round(statistics.mean(oh_abs_errs), 2) if oh_abs_errs else 0,
+        overhead_median_abs_error_pct=round(statistics.median(oh_abs_errs), 2) if oh_abs_errs else 0,
+        overhead_max_abs_error_pct=round(max(oh_abs_errs), 2) if oh_abs_errs else 0,
         worst_offenders=worst,
         per_model_stats=per_model,
     )

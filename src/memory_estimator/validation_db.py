@@ -50,6 +50,7 @@ class LogMemoryData:
     max_concurrency_tokens: int | None = None
     max_concurrency_ratio: float | None = None
     cudagraph_gib: float | None = None
+    gpu_memory_utilization: float = 0.9
 
 
 @dataclass
@@ -125,6 +126,7 @@ _RE_CONCURRENCY = re.compile(
 _RE_CUDAGRAPH = re.compile(
     r"Graph capturing finished in \d+ secs, took (-?[\d.]+) GiB"
 )
+_RE_GPU_MEM_UTIL = re.compile(r"gpu_memory_utilization['\"]?:\s*([\d.]+)")
 
 
 def _parse_bool(val: str) -> bool:
@@ -191,6 +193,7 @@ def parse_log_memory(text: str) -> LogMemoryData | None:
     kt = _RE_KV_TOKENS.search(cleaned)
     mc = _RE_CONCURRENCY.search(cleaned)
     cg = _RE_CUDAGRAPH.search(cleaned)
+    gu = _RE_GPU_MEM_UTIL.search(cleaned)
 
     return LogMemoryData(
         model_load_gib=float(ml.group(1)),
@@ -199,6 +202,7 @@ def parse_log_memory(text: str) -> LogMemoryData | None:
         max_concurrency_tokens=int(mc.group(1).replace(",", "")) if mc else None,
         max_concurrency_ratio=float(mc.group(2)) if mc else None,
         cudagraph_gib=float(cg.group(1)) if cg else None,
+        gpu_memory_utilization=float(gu.group(1)) if gu else 0.9,
     )
 
 
