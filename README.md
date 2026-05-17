@@ -227,9 +227,11 @@ with `nominal_gib`, `lower_gib`, and `upper_gib` fields:
    `shlex.split` and parsed with argparse using `parse_known_args` to extract
    memory-relevant flags. Unknown flags are ignored.
 
-2. **Configuration loading** — Downloads `config.json` from the Hugging Face
-   Hub and inspects `quantization_config` to determine quantization method,
-   weight dtype, activation dtype, and KV cache dtype.
+2. **Configuration loading** — Constructs a vLLM `ModelConfig` from the
+   Hugging Face model ID (no GPU required). This provides accurate
+   architecture detection (MLA, hybrid Mamba, sliding window), TP-aware KV
+   head counts (`max(1, total_kv_heads // tp)`), and quantization config
+   parsing — all reusing vLLM's own logic rather than reimplementing it.
 
 3. **Parameter byte counting** — Reads safetensors file headers via
    `huggingface_hub.get_safetensors_metadata` to obtain exact on-disk byte
@@ -316,6 +318,10 @@ tests/
 ├── test_validation_runner.py # Validation runner and report tests
 ├── test_memory_profile.py    # GPU integration test (PyTorch runtime comparison)
 └── test_vllm_profile.py      # vLLM integration test (validates against vllm bench)
+
+scripts/
+├── build_validation_db.py    # Build validation DB from CSV + vLLM logs
+└── run_validation.py         # Run estimator against validation DB and report
 ```
 
 ## Testing
@@ -355,45 +361,83 @@ includes most decoder-only architectures:
 - LLaMA / Llama 2 / Llama 3 / Llama 4 family
 - GPT-2 / GPT-NeoX / OPT
 - Mistral / Mixtral (MoE)
-- DeepSeek V2 / V3 / R1 (MLA + MoE)
-- Qwen / Qwen2 / Qwen3
+- DeepSeek V2 / V3 / V4 / R1 (MLA + MoE)
+- Qwen / Qwen2 / Qwen3 / Qwen3-VL / Qwen3.5 (including MoE)
 - Phi / Phi-3
 - Falcon / Falcon-H1 (hybrid Mamba)
-- Gemma
+- Gemma / Gemma-4 (sliding window)
 - Jamba (hybrid Mamba + Attention)
+- Nemotron-H (hybrid Mamba + Attention)
+- Kimi-K2 / MiniMax (MLA)
 
 Quantized checkpoints (GPTQ, AWQ, compressed-tensors, FP8, MXFP4) are handled
 automatically when `quantization_config` is present in the model config.
 
 ## Validation
 
-The estimator is validated against real vLLM startup logs from 233 deployment
-records across 23 models. Run the validation suite:
+The estimator is validated against real vLLM startup logs from 231 deployment
+records across 22 model families. Run the validation suite:
 
 ```bash
 python scripts/run_validation.py
 python scripts/run_validation.py --html test_data/validation_report.html
+python scripts/run_validation.py --model "DeepSeek-R1"     # filter by model
 ```
 
-The report compares two memory components against vLLM runtime data:
+The HTML report includes sortable tables, summary cards, and per-model
+breakdowns. Reports are versioned by date to preserve history.
 
-- **Weights** — estimated vs actual `model_load_gib` from vLLM logs
-- **KV cache** — estimated vs actual per-token KV cache bytes (derived from
-  `available_kv_cache_gib / kv_cache_tokens` in logs)
+### What it compares
 
-Current accuracy (May 2025): **94.8% of weight estimates within bounds**, 2.1%
-mean weight error, <1% KV per-token error for most model families.
+The report compares three memory dimensions against vLLM runtime data:
+
+| Metric | What it compares | Scope |
+|--------|-----------------|-------|
+| **Weights (Wt)** | Estimated vs actual `model_load_gib` from vLLM logs | All models |
+| **KV cache (KV)** | Estimated vs actual bytes per token (derived from `available_kv_cache_gib / kv_cache_tokens`) | Full attention and MLA models only — skipped for sliding window, mamba, and hybrid specs where cache size doesn't scale linearly with sequence length |
+| **Overhead (OH)** | Estimated vs actual non-weight overhead (activations + workspace + CUDA graphs + vLLM runtime) | All models with known GPU memory |
+
+The overhead metric derives actual overhead as:
+```
+actual_overhead = (total_gpu_memory × gpu_memory_utilization) - model_load - kv_allocation
+```
+using `gpu_memory_utilization` parsed from vLLM logs and a GPU memory lookup
+table for H200, B200, MI300X, and other accelerators.
+
+### Current accuracy
+
+- **94.8%** of weight estimates within bounds, **2.1%** mean weight error
+- **<1%** KV per-token error for most model families (full attention and MLA)
+- **~47%** mean overhead error — activation and CUDA graph estimation needs
+  improvement
+
+### Building the validation database
+
+The validation DB is built from vLLM startup logs and benchmark CSV metadata:
+
+```bash
+python scripts/build_validation_db.py
+python scripts/build_validation_db.py --download-s3    # fetch logs from S3
+```
 
 ## Notes and Limitations
 
-- The estimator runs entirely on CPU — no GPU is needed.
+- The estimator runs entirely on CPU — no GPU is needed. It uses vLLM's
+  `ModelConfig` for architecture detection but does not load model weights.
 - Parameter memory is the exact on-disk size from safetensors file headers.
   Models without safetensors files are not supported.
+- Architecture detection (MLA, hybrid, sliding window) is delegated to vLLM's
+  `ModelConfig`, which means the estimator stays in sync as vLLM adds new
+  architectures. KV cache spec construction still uses manual logic since
+  vLLM's `get_kv_cache_spec()` requires a loaded model with GPU.
 - Actual runtime consumption can exceed estimates due to CUDA allocator
   fragmentation, LoRA adapters, speculative decoding, or tensor parallelism
   communication buffers. Leave headroom in production deployments.
 - At large model scales (70B+), weights and KV cache dominate memory;
   activation estimates become proportionally less significant.
+- Non-weight overhead (activations, CUDA graphs, workspace) has higher
+  estimation error (~47%) than weights (~2%) or KV cache (<1%). This is an
+  area for improvement.
 
 ## License
 
