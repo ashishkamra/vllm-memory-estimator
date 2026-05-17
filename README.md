@@ -1,18 +1,42 @@
 # vllm-memory-estimator
 
-A utility that estimates GPU memory requirements for serving Hugging Face models
-with [vLLM](https://github.com/vllm-project/vllm). Two modes:
+Estimates GPU memory requirements for serving Hugging Face models with
+[vLLM](https://github.com/vllm-project/vllm). Two modes:
 
 - **Estimate** — pass a `vllm serve` command and get per-GPU memory breakdowns
 - **Budget** — given a model and GPU memory, see what context lengths and
   concurrency levels fit
 
-Reads model metadata from Hugging Face (no weight download required) and uses
-vLLM's actual KV cache spec classes for accurate cache estimation.
-
 Supports tensor parallelism (TP), pipeline parallelism (PP), data parallelism
 (DP), and expert parallelism (EP) for MoE models — including DeepSeek-style
 DP+EP (Wide EP) where attention is replicated and experts are distributed.
+
+### Why vLLM is a dependency
+
+This estimator is **intentionally tightly coupled with vLLM** — it imports and
+reuses vLLM code rather than reimplementing it. The reasoning:
+
+- **Architecture detection** — vLLM's `ModelConfig` correctly classifies
+  hundreds of model architectures (MLA, hybrid Mamba, sliding window, chunked
+  local attention) and handles edge cases like TP-aware KV head replication
+  (`max(1, kv_heads // tp)`). Reimplementing this logic means falling behind
+  every time vLLM adds a new architecture or fixes a classification bug.
+
+- **KV cache sizing** — The estimator constructs vLLM's actual `KVCacheSpec`
+  objects (`FullAttentionSpec`, `MLAAttentionSpec`, `SlidingWindowSpec`,
+  `MambaSpec`, etc.) and calls their `max_memory_usage_bytes()` methods.
+  This guarantees the estimate matches what vLLM would allocate at runtime,
+  including block-size alignment and quantization-aware sizing.
+
+- **No GPU required** — Despite importing vLLM, the estimator only uses its
+  config and interface layers. It downloads `config.json` from Hugging Face,
+  constructs a `ModelConfig` (which runs on CPU), reads safetensors file
+  headers for parameter byte counts, and computes estimates — no model
+  weights are loaded and no GPU is needed.
+
+The trade-off is that the estimator must be installed alongside a compatible
+vLLM version. This is deliberate: an estimate that doesn't match the serving
+runtime is worse than no estimate at all.
 
 ## Installation
 
@@ -29,9 +53,8 @@ pip install -e ".[dev]"
 ### Dependencies
 
 - `huggingface_hub>=0.20.0` — model config and safetensors header fetching
-- `vllm>=0.9.0` — `ModelConfig` for architecture detection (MLA, hybrid,
-  TP-aware KV head counts) and `KVCacheSpec` classes for cache estimation.
-  No GPU required — the estimator uses vLLM's config layer only.
+- `vllm>=0.9.0` — `ModelConfig` for architecture detection and `KVCacheSpec`
+  classes for cache estimation (CPU only, no GPU required)
 
 ## Usage
 
@@ -422,13 +445,11 @@ python scripts/build_validation_db.py --download-s3    # fetch logs from S3
 
 ## Notes and Limitations
 
-- The estimator runs entirely on CPU — no GPU is needed. It uses vLLM's
-  `ModelConfig` for architecture detection but does not load model weights.
+- The estimator runs entirely on CPU — no GPU is needed.
 - Parameter memory is the exact on-disk size from safetensors file headers.
   Models without safetensors files are not supported.
-- Architecture detection (MLA, hybrid, sliding window) is delegated to vLLM's
-  `ModelConfig`, which means the estimator stays in sync as vLLM adds new
-  architectures. KV cache spec construction still uses manual logic since
+- KV cache spec construction (building the `FullAttentionSpec`, `MambaSpec`,
+  etc. with the right parameters) is still done by the estimator since
   vLLM's `get_kv_cache_spec()` requires a loaded model with GPU.
 - Actual runtime consumption can exceed estimates due to CUDA allocator
   fragmentation, LoRA adapters, speculative decoding, or tensor parallelism
