@@ -392,7 +392,7 @@ automatically when `quantization_config` is present in the model config.
 
 The estimator is validated against real vLLM startup logs (231 records, 22
 model families) comparing weights, KV cache per-token bytes, and non-weight
-overhead. The validation suite lives in a separate repo:
+overhead. The validation suite lives in a separate private repo:
 [vllm-memoryestimator-validation](https://github.com/ashishkamra/vllm-memoryestimator-validation).
 
 Current accuracy: **94.8%** weight estimates in bounds (2.1% mean error),
